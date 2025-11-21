@@ -1,0 +1,29 @@
+[package]
+name = "noi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Runtime glue for the noi Noir-to-Rust bindings"
+
+[features]
+default = []
+runner = []
+prove = []
+field = []
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true
+"fs-err".workspace = true
+indexmap.workspace = true
+once_cell.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

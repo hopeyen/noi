@@ -1,0 +1,15 @@
+[package]
+name = "noi-example-app"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+noi = { path = "../../crates/noi" }
+
+[build-dependencies]
+noi-build = { path = "../../crates/noi-build" }

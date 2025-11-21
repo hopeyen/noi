@@ -1,0 +1,7 @@
+[package]
+name = "demo"
+type = "bin"
+authors = ["noi contributors"]
+compiler_version = "1.0.0-beta.15"
+
+[dependencies]

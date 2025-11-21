@@ -1,0 +1,18 @@
+[package]
+name = "noi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Rust interface to generated Noir bindings"
+
+[features]
+default = []
+runner = []
+prove = []
+field = []
+
+[dependencies]
+noi-core = { path = "../noi-core", default-features = false }
+noi-macro = { path = "../noi-macro", default-features = false }
