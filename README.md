@@ -310,6 +310,20 @@ inputs.
 - Review the stricter engineering standards in `AGENTS.md` before opening a PR. The milestones
   listed in `milestone.md` define the scope and acceptance tests for each iteration.
 
+## Publishing crates
+- `noi-core`, `noi-build`, and `noi-macro` must be published before `noi` because the facade depends
+  on them.
+- Use the helper script to publish in order (pass `--dry-run` while testing):
+
+  ```bash
+  chmod +x scripts/publish.sh
+  scripts/publish.sh --dry-run
+  scripts/publish.sh          # real publish once satisfied
+  ```
+
+  The script calls `cargo publish -p <crate>` for each crate in dependency order, so the final crate
+  on crates.io is `noi`—the user-facing package name you asked for.
+
 ## Troubleshooting
 - **`nargo` missing:** builds succeed using the fallback exports but log a warning. Install `nargo`
   to regenerate fresh JSON.

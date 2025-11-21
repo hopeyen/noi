@@ -14,7 +14,7 @@ authors = ["noi contributors"]
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.74"
-version = "0.1.0"
+version = "0.0.1"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -34,3 +34,9 @@ syn = { version = "2.0", features = ["full"] }
 thiserror = "1.0"
 tempfile = "3.10"
 walkdir = "2.5"
+
+[patch.crates-io]
+noi-core = { path = "crates/noi-core" }
+noi-build = { path = "crates/noi-build" }
+noi-macro = { path = "crates/noi-macro" }
+noi = { path = "crates/noi" }

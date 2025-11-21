@@ -14,5 +14,5 @@ prove = []
 field = []
 
 [dependencies]
-noi-core = { path = "../noi-core", default-features = false }
-noi-macro = { path = "../noi-macro", default-features = false }
+noi-core = { version = "0.0.1", default-features = false }
+noi-macro = { version = "0.0.1", default-features = false }
