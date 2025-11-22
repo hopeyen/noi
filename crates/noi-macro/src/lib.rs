@@ -135,10 +135,14 @@ fn generate_function_module(
         .map(|param| {
             let ident = &param.ident;
             let name = &param.name;
+            let source = match param.visibility {
+                VisibilityClass::Public => quote!(inputs.public.#ident),
+                VisibilityClass::Private => quote!(inputs.private.#ident),
+            };
             quote! {
                 input_map.insert(
                     #name.to_string(),
-                    ::noi_core::runtime::ToInputValue::to_input_value(&args.#ident),
+                    ::noi_core::runtime::ToInputValue::to_input_value(&#source),
                 );
             }
         })
@@ -146,6 +150,7 @@ fn generate_function_module(
 
     let simulate_body = if function.return_type.is_some() {
         quote! {
+            let inputs: Inputs = inputs.into();
             let mut input_map = ::std::collections::BTreeMap::new();
             #(#insert_inputs)*
             let result = ::noi_core::runtime::run_function(
@@ -160,6 +165,7 @@ fn generate_function_module(
         }
     } else {
         quote! {
+            let inputs: Inputs = inputs.into();
             let mut input_map = ::std::collections::BTreeMap::new();
             #(#insert_inputs)*
             ::noi_core::runtime::run_function(client.program_dir(), #fn_name_lit, input_map)?;
@@ -168,7 +174,7 @@ fn generate_function_module(
     };
 
     let simulate_fn = quote! {
-        pub fn simulate(client: &super::Client, args: Args) -> ::anyhow::Result<Output> {
+        pub fn simulate(client: &super::Client, inputs: impl ::core::convert::Into<Inputs>) -> ::anyhow::Result<Output> {
             #simulate_body
         }
     };

@@ -1,5 +1,3 @@
-#![cfg(feature = "runner")]
-
 use std::collections::BTreeMap;
 use std::path::Path;
 

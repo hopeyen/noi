@@ -341,5 +341,8 @@ inputs.
 
 ## Roadmap
 - Milestone 4 (done): integrate the Noir runner crate so `simulate` produces real outputs.
-- Milestone 5+: expand type coverage, add public/private input ergonomics, and wire proving paths.
+- Milestone 5+: expand type coverage (done), add public/private input ergonomics (done), and wire
+  proving paths (blocked until Noir exposes a reusable prover API; currently only the `nargo
+  prove/verify` CLI exists, so we can’t offer `noi-core::prove/verify` without reimplementing the
+  upstream proving stack).
 - Milestone 9+: ship documentation + examples polished enough for crates.io publication.

@@ -6,13 +6,11 @@
 //! ```no_run
 //! use std::{env, path::PathBuf};
 //!
-//! fn main() {
-//!     let opts = noi_build::BuildOptions {
-//!         program_dir: PathBuf::from("./noir"),
-//!         out_dir: PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
-//!     };
-//!     noi_build::export(&opts).expect("nargo export failed");
-//! }
+//! let opts = noi_build::BuildOptions {
+//!     program_dir: PathBuf::from("./noir"),
+//!     out_dir: PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
+//! };
+//! noi_build::export(&opts).expect("nargo export failed");
 //! ```
 //!
 //! When `nargo` isn’t available (e.g., CI or docs.rs), the helper gracefully falls back to any JSON

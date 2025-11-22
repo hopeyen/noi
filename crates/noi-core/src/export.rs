@@ -35,17 +35,12 @@ impl ExportFunction {
 }
 
 /// Function visibility marker as reported by the Noir compiler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
     Public,
+    #[default]
     Private,
-}
-
-impl Default for Visibility {
-    fn default() -> Self {
-        Visibility::Private
-    }
 }
 
 /// A single parameter entry in the exported ABI.
