@@ -1,0 +1,18 @@
+name: Refresh Noir exports
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refresh demo + dark-pool exports
+        run: scripts/refresh_exports.sh
+      - name: Ensure exports are committed
+        run: git diff --stat --exit-code

@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         &client,
         demo::mix::Args {
             point: demo::Point { x: 2, y: 9 },
-            toggle: (true, [5, 7, 3]),
+            toggles: (true, [5, 7, 3]),
         },
     )?;
     println!("mix output = Point {{ x: {}, y: {} }}", point.x, point.y);

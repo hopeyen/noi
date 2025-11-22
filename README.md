@@ -309,6 +309,13 @@ inputs.
 - Review the stricter engineering standards in `AGENTS.md` before opening a PR. The milestones
   listed in `milestone.md` define the scope and acceptance tests for each iteration.
 
+### Refreshing Noir exports
+- Run `scripts/refresh_exports.sh` whenever you change the Noir sources under `examples/*/noir/`.
+  The script installs `nargo` (if missing) and runs `nargo export` for the demo and dark-pool
+  programs so the checked-in `export/` artifacts stay in sync with the Rust fixtures.
+- CI executes the same script (see `.github/workflows/refresh-exports.yml`) and fails when the
+  committed exports drift, so keeping `export/` up to date locally avoids review churn.
+
 ## Publishing crates
 - `noi-core`, `noi-build`, and `noi-macro` must be published before `noi` because the facade depends
   on them.
