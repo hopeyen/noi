@@ -13,6 +13,5 @@ Run it with:
 cargo run -p noi-example-app
 ```
 
-You’ll see log output describing the simulated calls. Until the Noir runner work lands (milestone 4),
-the `simulate` helpers return friendly `todo!()` errors—expected behavior that’s also mentioned in the
-root README.
+You’ll see log output describing the simulated calls plus assertions verifying the math. The example
+uses the checked-in exports under `./noir/export`, so it runs even if `nargo` isn’t installed.

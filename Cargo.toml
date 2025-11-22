@@ -15,8 +15,13 @@ edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.74"
 version = "0.0.1"
+repository = "https://github.com/hopeyen/noi"
+homepage = "https://github.com/hopeyen/noi"
+documentation = "https://docs.rs/noi"
 
 [workspace.dependencies]
+acvm = { git = "https://github.com/noir-lang/noir", tag = "v0.36.0", package = "acvm" }
+noir-runner = { git = "https://github.com/noir-lang/noir-runner", rev = "2655620c6d0537bf6b4ddca2896283861090504f" }
 anyhow = "1.0"
 camino = "1.1"
 "fs-err" = "2.11"
@@ -40,3 +45,5 @@ noi-core = { path = "crates/noi-core" }
 noi-build = { path = "crates/noi-build" }
 noi-macro = { path = "crates/noi-macro" }
 noi = { path = "crates/noi" }
+# noir-runner pulls in noir_fuzzer, which still expects the rand 0.8-compatible proptest APIs.
+proptest = { git = "https://github.com/AltSysrq/proptest", rev = "0b4ffe8d08891b1bc14079b811a74df7f98dc4da" }

@@ -38,7 +38,7 @@ witness maps.
 ## Requirements
 - Rust stable toolchain (pinned via `rust-toolchain.toml`).
 - Noir toolchain with `nargo` ≥ `1.0.0-beta.15`. If `nargo` isn’t on PATH, `noi-build` quietly
-  copies the pre-exported fixtures under `examples/*/noir/exports`, so `cargo check` keeps
+  copies the pre-exported fixtures under `examples/*/noir/export`, so `cargo check` keeps
   working (but you won’t pick up schema changes until you run `nargo export`).
 
 ## Workspace layout
@@ -225,11 +225,10 @@ fn validate_public_inputs(data: &risk::score::PublicInputs) -> anyhow::Result<()
 ```
 
 ## Production & publication status
-`noi` is **pre-release/alpha**. Codegen is production-grade (deterministic, lint-clean), but the
-runtime hooks in `noi-core` still return `todo!()` errors because Noir runner integration (milestone
-4+) is outstanding. Publishing to crates.io will happen after those hooks are live and we stabilize
-the runtime APIs. Until then, treat `noi` as a codegen scaffold: generated modules compile, expose
-typed inputs, and are ready to call once runtime glue is implemented.
+`noi` is **pre-release/alpha**. Codegen and the `simulate` path are wired through the
+[`noir-runner`](https://github.com/noir-lang/noir-runner) crate, so you can exercise Noir exports
+from Rust today. The proving/verification helpers are still placeholders until milestone 7 lands.
+Publishing to crates.io will happen once those runtime APIs stabilize.
 
 ## Using `noi` in your project
 1. Add dependencies (path-based until the crates are published):
@@ -259,7 +258,8 @@ typed inputs, and are ready to call once runtime glue is implemented.
        let noir_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("path/to/noir/project");
        let client = demo::Client::new(noir_dir);
        let args = demo::add::Args { a: 5, b: 6 };
-       let _ = demo::add::simulate(&client, args)?; // currently returns todo!()
+       let sum = demo::add::simulate(&client, args)?;
+       assert_eq!(sum, 11);
        Ok(())
    }
    ```
@@ -272,8 +272,7 @@ typed inputs, and are ready to call once runtime glue is implemented.
    ```
    The example crate lives at `examples/demo/` and embeds its Noir project under `examples/demo/noir`.
    The build script stages exports from that directory, the macro generates bindings, and the binary
-   executes a simulated call. Without `nargo`, the build falls back to the checked-in JSON fixtures
-   so you can still inspect the generated API surface.
+   executes real Noir code (falling back to the checked-in JSON fixtures when `nargo` is missing).
    See `examples/README.md` for a deeper walkthrough of the demo.
 
 Want something closer to production? Try the dark-pool flavored example:
@@ -287,7 +286,7 @@ inputs.
 
 ## Detailed behavior & knobs
 - `NOI_EXPORT_DIR`: automatically set by `noi-build`, but you can override it manually when calling
-  `nrg!` (e.g., `nrg!(module = demo, export_dir = "../exports")`).
+  `nrg!` (e.g., `nrg!(module = demo, export_dir = "../export")`).
 - `NOI_DEBUG=1`: when set, the macro dumps the expanded Rust code into `target/noi/expanded.rs` for
   inspection and IDE completion debugging.
 - `NOI_NARGO_BIN`: optional path to a custom `nargo` binary for environments that pin toolchains.
@@ -296,8 +295,8 @@ inputs.
   reverse, so you can ergonomically switch representations.
 
 ## Limitations & open work
-- Runtime evaluation (`simulate`, `prove`, `verify`) is stubbed until Noir runner support is wired
-  in (see milestone 4+).
+- `simulate` already talks to Noir via `noir-runner`; `prove`/`verify` will be implemented in
+  the proving milestones.
 - Type coverage currently includes primitives, field elements, fixed arrays, tuples, and structs.
   Extend `TypeRepr` + fixtures before relying on additional Noir features.
 - `noi-build` expects a `Nargo.toml` with sources under `src/`. Custom layouts must copy JSON into
@@ -333,6 +332,6 @@ inputs.
   and expand the macro’s type mapping.
 
 ## Roadmap
-- Milestone 4: integrate the Noir runner crate so `simulate` produces real outputs.
+- Milestone 4 (done): integrate the Noir runner crate so `simulate` produces real outputs.
 - Milestone 5+: expand type coverage, add public/private input ergonomics, and wire proving paths.
 - Milestone 9+: ship documentation + examples polished enough for crates.io publication.

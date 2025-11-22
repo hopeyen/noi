@@ -16,6 +16,5 @@ Run it with:
 cargo run -p noi-dark-pool-example
 ```
 
-As with the other examples, the runtime hooks still emit TODO-style errors until milestone 4 wires in
-`noir-runner`, but the generated bindings highlight how structs, arrays, and public/private inputs
-map into Rust.
+The sample Noir exports live under `./noir/export`, so the example produces deterministic results
+even without `nargo` installed.

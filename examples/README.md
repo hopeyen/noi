@@ -29,12 +29,11 @@ cargo run -p noi-example-app
 ```
 Expect log lines similar to:
 ```
-simulate(add) not yet implemented: todo!()
-simulate(mix) not yet implemented: todo!()
-Public inputs = demo::mix::PublicInputs { toggle: (true, [5, 7, 3]) }, Private inputs = demo::mix::PrivateInputs { point: Point { x: 2, y: 9 } }
+5 + 6 = 11
+mix output = Point { x: 7, y: 12 }
 ```
-Runner/prover hooks arrive in milestone 4, so for now you’ll see informative `todo!()` messages. The
-goal is to highlight the generated API surface and wiring, not runtime behavior (yet).
+`nargo` isn’t required for this example—the committed exports under `examples/demo/noir/export`
+keep `cargo run` working everywhere.
 
 ## `dark-pool/`
 

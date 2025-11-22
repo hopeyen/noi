@@ -5,7 +5,10 @@ struct Order {
 
 #[export]
 fn match_orders(bid: Order, ask: Order, min_size: u64) -> bool {
-    bid.price >= ask.price && bid.size >= min_size && ask.size >= min_size
+    let price_ok = bid.price >= ask.price;
+    let bid_ok = bid.size >= min_size;
+    let ask_ok = ask.size >= min_size;
+    price_ok & bid_ok & ask_ok
 }
 
 #[export]

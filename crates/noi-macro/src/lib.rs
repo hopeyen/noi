@@ -1,9 +1,36 @@
+//! `noi-macro` implements the `nrg!` procedural macro. Point it at the directory containing
+//! `nargo export` JSON artifacts and it will emit strongly typed Rust modules for each Noir
+//! `#[export]` function. The generated modules expose `Args` structs, visibility-aware `Inputs`
+//! wrappers, a shared `Client`, and helper functions like `simulate`/`prove`/`verify` (the proving
+//! APIs become functional once the runtime hooks land in `noi-core`).
+//!
+//! ```no_run
+//! use noi::nrg;
+//!
+//! nrg!(module = trading);
+//!
+//! fn main() -> anyhow::Result<()> {
+//!     let client = trading::Client::new("./noir");
+//!     let _ = trading::match_orders::simulate(
+//!         &client,
+//!         trading::match_orders::Args {
+//!             bid: trading::Order { price: 1_005, size: 50 },
+//!             ask: trading::Order { price: 1_000, size: 40 },
+//!             min_size: 25,
+//!         },
+//!     )?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Set `NOI_DEBUG=1` to dump the generated Rust into `target/noi/expanded.rs` when you want to review
+//! or debug the emitted code.
 use std::{env, fs, path::PathBuf};
 
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use indexmap::IndexMap;
 use noi_core::{
-    export::{ExportFunction, Param, StructField, StructType, TypeRepr},
+    export::{ExportFunction, Param, StructType, TypeRepr},
     load_export_dir,
 };
 use proc_macro::TokenStream;
@@ -102,10 +129,47 @@ fn generate_function_module(
 
     let artifact_path = canonical_path(&function.source_path);
     let artifact_lit = LitStr::new(&artifact_path, proc_macro2::Span::call_site());
+    let fn_name_lit = LitStr::new(&function.name, proc_macro2::Span::call_site());
+    let insert_inputs: Vec<_> = params
+        .iter()
+        .map(|param| {
+            let ident = &param.ident;
+            let name = &param.name;
+            quote! {
+                input_map.insert(
+                    #name.to_string(),
+                    ::noi_core::runtime::ToInputValue::to_input_value(&args.#ident),
+                );
+            }
+        })
+        .collect();
+
+    let simulate_body = if function.return_type.is_some() {
+        quote! {
+            let mut input_map = ::std::collections::BTreeMap::new();
+            #(#insert_inputs)*
+            let result = ::noi_core::runtime::run_function(
+                client.program_dir(),
+                #fn_name_lit,
+                input_map,
+            )?;
+            let value = result.ok_or_else(|| {
+                ::anyhow::anyhow!("function `{}` did not return a value", #fn_name_lit)
+            })?;
+            ::noi_core::runtime::FromOutputValue::from_output_value(value)
+        }
+    } else {
+        quote! {
+            let mut input_map = ::std::collections::BTreeMap::new();
+            #(#insert_inputs)*
+            ::noi_core::runtime::run_function(client.program_dir(), #fn_name_lit, input_map)?;
+            Ok(())
+        }
+    };
 
     let simulate_fn = quote! {
-        pub fn simulate(_client: &super::Client, _args: Args) -> ::anyhow::Result<Output> {
-            Err(::anyhow::anyhow!("`noi` runner integration is not implemented yet"))
+        pub fn simulate(client: &super::Client, args: Args) -> ::anyhow::Result<Output> {
+            #simulate_body
         }
     };
 
@@ -141,6 +205,7 @@ fn build_param_specs(function: &ExportFunction, registry: &mut TypeRegistry) -> 
 
 struct ParamSpec {
     ident: Ident,
+    name: LitStr,
     ty: proc_macro2::TokenStream,
     visibility: VisibilityClass,
 }
@@ -148,6 +213,7 @@ struct ParamSpec {
 impl ParamSpec {
     fn new(param: &Param, registry: &mut TypeRegistry) -> Self {
         let ident = format_ident!("{}", sanitize_snake(&param.name));
+        let name = LitStr::new(&param.name, proc_macro2::Span::call_site());
         let ty = registry.ty_tokens(&param.ty, TypeUsage::Reference);
         let visibility = match param.visibility {
             noi_core::export::Visibility::Public => VisibilityClass::Public,
@@ -155,6 +221,7 @@ impl ParamSpec {
         };
         Self {
             ident,
+            name,
             ty,
             visibility,
         }
@@ -452,27 +519,73 @@ impl TypeRegistry {
         let ident = self.next_struct_ident(struct_ty);
         self.structs.insert(struct_ty.clone(), ident.clone());
 
-        let fields = struct_ty
-            .fields
-            .iter()
-            .map(|field| self.struct_field_tokens(field))
-            .collect::<Vec<_>>();
+        let mut field_tokens = Vec::new();
+        let mut to_entries = Vec::new();
+        let mut from_entries = Vec::new();
+        let mut assignments = Vec::new();
+
+        for field in &struct_ty.fields {
+            let field_ident = format_ident!("{}", sanitize_snake(&field.name));
+            let ty = self.ty_tokens(&field.ty, TypeUsage::Definition);
+            let field_name = LitStr::new(&field.name, proc_macro2::Span::call_site());
+
+            field_tokens.push(quote!(pub #field_ident: #ty,));
+            to_entries.push(quote! {
+                map.insert(
+                    #field_name.to_string(),
+                    ::noi_core::runtime::ToInputValue::to_input_value(&self.#field_ident),
+                );
+            });
+            from_entries.push(quote! {
+                let value = map
+                    .remove(#field_name)
+                    .ok_or_else(|| ::anyhow::anyhow!(
+                        "missing field `{}` in struct `{}`",
+                        #field_name,
+                        stringify!(#ident)
+                    ))?;
+                let #field_ident = ::noi_core::runtime::FromOutputValue::from_output_value(value)?;
+            });
+            assignments.push(field_ident);
+        }
 
         let def = quote! {
             #[derive(Clone, Debug, PartialEq, Default)]
             pub struct #ident {
-                #(#fields)*
+                #(#field_tokens)*
             }
         };
-        self.defs.push(def);
+
+        let to_impl = quote! {
+            impl ::noi_core::runtime::ToInputValue for #ident {
+                fn to_input_value(&self) -> ::noi_core::runtime::InputValue {
+                    let mut map = ::std::collections::BTreeMap::new();
+                    #(#to_entries)*
+                    ::noi_core::runtime::InputValue::Struct(map)
+                }
+            }
+        };
+
+        let from_impl = quote! {
+            impl ::noi_core::runtime::FromOutputValue for #ident {
+                fn from_output_value(value: ::noi_core::runtime::InputValue) -> ::anyhow::Result<Self> {
+                    if let ::noi_core::runtime::InputValue::Struct(mut map) = value {
+                        #(#from_entries)*
+                        Ok(Self { #( #assignments, )* })
+                    } else {
+                        Err(::anyhow::anyhow!("expected struct `{}`", stringify!(#ident)))
+                    }
+                }
+            }
+        };
+
+        self.defs.push(quote! {
+            #def
+            #to_impl
+            #from_impl
+        });
 
         ident
-    }
-
-    fn struct_field_tokens(&mut self, field: &StructField) -> proc_macro2::TokenStream {
-        let ident = format_ident!("{}", sanitize_snake(&field.name));
-        let ty = self.ty_tokens(&field.ty, TypeUsage::Definition);
-        quote!(pub #ident: #ty,)
     }
 
     fn next_struct_ident(&mut self, struct_ty: &StructType) -> Ident {

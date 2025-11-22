@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Build helper that runs `nargo export` and stages artifacts for noi"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/noi-build"
+readme = "README.md"
+keywords = ["noir", "zk", "bindings"]
+categories = ["development-tools::build-utilities", "cryptography"]
 
 [dependencies]
 anyhow.workspace = true

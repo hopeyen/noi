@@ -1,3 +1,23 @@
+//! `noi-build` is a small helper intended for use inside `build.rs`. It shells out to `nargo export`,
+//! copies the resulting JSON artifacts into `$OUT_DIR/noi_exports`, and emits the `NOI_EXPORT_DIR`
+//! environment variable so the `nrg!` proc macro knows where to look.
+//!
+//! Typical usage:
+//! ```no_run
+//! use std::{env, path::PathBuf};
+//!
+//! fn main() {
+//!     let opts = noi_build::BuildOptions {
+//!         program_dir: PathBuf::from("./noir"),
+//!         out_dir: PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
+//!     };
+//!     noi_build::export(&opts).expect("nargo export failed");
+//! }
+//! ```
+//!
+//! When `nargo` isn’t available (e.g., CI or docs.rs), the helper gracefully falls back to any JSON
+//! already committed to `program_dir/noir_exports`, so dependent crates can still run.
+
 use std::{
     env,
     path::{Path, PathBuf},
@@ -118,24 +138,26 @@ fn stage_exports(program_dir: &Path, dest_dir: &Path) -> Result<StageResult> {
         }
     }
 
-    let fallback = program_dir.join("exports");
-    if fallback.exists() {
-        let staged = copy_artifacts(&fallback, dest_dir)?;
-        if !staged.is_empty() {
-            verbose(&format!(
-                "staged {} fallback export(s) into {}",
-                staged.len(),
-                dest_dir.display()
-            ));
-            return Ok(StageResult {
-                artifacts: staged,
-                source: StageSource::Fallback(fallback),
-            });
+    for fallback_name in ["export", "exports"] {
+        let fallback = program_dir.join(fallback_name);
+        if fallback.exists() {
+            let staged = copy_artifacts(&fallback, dest_dir)?;
+            if !staged.is_empty() {
+                verbose(&format!(
+                    "staged {} fallback export(s) into {}",
+                    staged.len(),
+                    dest_dir.display()
+                ));
+                return Ok(StageResult {
+                    artifacts: staged,
+                    source: StageSource::Fallback(fallback),
+                });
+            }
         }
     }
 
     Err(anyhow!(
-        "no JSON artifacts found in `{}` (expected either `target/` or `exports/`)",
+        "no JSON artifacts found in `{}` (expected either `target/` or `export[s]/`)",
         program_dir.display()
     ))
 }

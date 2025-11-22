@@ -6,13 +6,23 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Rust interface to generated Noir bindings"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/noi"
+readme = "README.md"
+keywords = ["noir", "zk", "bindings"]
+categories = ["cryptography"]
+build = "build.rs"
 
 [features]
-default = []
-runner = []
-prove = []
-field = []
+default = ["runner"]
+runner = ["noi-core/runner", "noi-macro/runner"]
+prove = ["noi-core/prove", "noi-macro/prove"]
+field = ["noi-core/field", "noi-macro/field"]
 
 [dependencies]
 noi-core = { version = "0.0.1", default-features = false }
 noi-macro = { version = "0.0.1", default-features = false }
+
+[dev-dependencies]
+anyhow.workspace = true
