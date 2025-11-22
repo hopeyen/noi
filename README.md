@@ -311,8 +311,9 @@ inputs.
 
 ### Refreshing Noir exports
 - Run `scripts/refresh_exports.sh` whenever you change the Noir sources under `examples/*/noir/`.
-  The script installs `nargo` (if missing) and runs `nargo export` for the demo and dark-pool
-  programs so the checked-in `export/` artifacts stay in sync with the Rust fixtures.
+  The script downloads a prebuilt `nargo` release from GitHub (or reuses an existing binary) and
+  runs `nargo export` for the demo and dark-pool programs so the checked-in `export/` artifacts stay
+  in sync with the Rust fixtures. Set `NARGO_BIN=/path/to/nargo` if you already have a binary handy.
 - CI executes the same script (see `.github/workflows/refresh-exports.yml`) and fails when the
   committed exports drift, so keeping `export/` up to date locally avoids review churn.
 

@@ -8,11 +8,13 @@ Small, runnable crates live here so you can try `noi` without wiring your own pr
 - Noir sources: embedded under `examples/demo/noir/`
 
 ### What the Noir program does
-Two functions are exported via `#[export]`:
+Three functions are exported via `#[export]`:
 
 1. `add(a: u32, b: u32) -> u32` – simple addition.
-2. `mix(point: Point, toggles: (bool, [u16; 3])) -> Point` – nudges the point by one of two deltas
-   based on the boolean; the third array slot always bumps `y`.
+2. `mix(t: (u32, bool), arr: [u16; 3]) -> (u32, bool)` – accumulates a tuple value and returns the
+   updated accumulator alongside the control flag.
+3. `move_point(p: P, dx: i32) -> P` – demonstrates struct inputs/outputs and signed integers by
+   shifting the x‑coordinate while clamping at zero.
 
 These simple circuits give the demo enough structure to showcase structs, tuples, arrays, and public
 vs private inputs.
@@ -30,7 +32,8 @@ cargo run -p noi-example-app
 Expect log lines similar to:
 ```
 5 + 6 = 11
-mix output = Point { x: 7, y: 12 }
+mix output = (17, true)
+move_point => P { x: 6, y: 4 }
 ```
 `nargo` isn’t required for this example—the committed exports under `examples/demo/noir/export`
 keep `cargo run` working everywhere.

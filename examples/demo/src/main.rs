@@ -13,16 +13,27 @@ fn main() -> Result<()> {
     println!("5 + 6 = {sum}");
     assert_eq!(sum, 11);
 
-    let point = demo::mix::simulate(
+    let mixed = demo::mix::simulate(
         &client,
         demo::mix::Args {
-            point: demo::Point { x: 2, y: 9 },
-            toggles: (true, [5, 7, 3]),
+            t: (12, true),
+            arr: [5, 7, 3],
         },
     )?;
-    println!("mix output = Point {{ x: {}, y: {} }}", point.x, point.y);
-    assert_eq!(point.x, 7);
-    assert_eq!(point.y, 12);
+    println!("mix output = ({}, {})", mixed.0, mixed.1);
+    assert_eq!(mixed.0, 17);
+    assert!(mixed.1);
+
+    let moved = demo::move_point::simulate(
+        &client,
+        demo::move_point::Args {
+            p: demo::P { x: 9, y: 4 },
+            dx: -3,
+        },
+    )?;
+    println!("move_point => P {{ x: {}, y: {} }}", moved.x, moved.y);
+    assert_eq!(moved.x, 6);
+    assert_eq!(moved.y, 4);
 
     Ok(())
 }

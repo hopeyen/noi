@@ -86,11 +86,12 @@ macro_rules! impl_unsigned {
 }
 
 macro_rules! impl_signed {
-    ($($ty:ty),+) => {
+    ($($ty:ty => $uty:ty),+) => {
         $(
         impl ToInputValue for $ty {
             fn to_input_value(&self) -> InputValue {
-                InputValue::Field(FieldElement::from(*self as i128))
+                let bits: $uty = (*self) as $uty;
+                InputValue::Field(FieldElement::from(bits as u128))
             }
         }
 
@@ -98,12 +99,11 @@ macro_rules! impl_signed {
             fn from_output_value(value: InputValue) -> Result<Self> {
                 match value {
                     InputValue::Field(field) => {
-                        let raw = field.to_i128();
-                        if raw < Self::MIN as i128 || raw > Self::MAX as i128 {
-                            Err(anyhow!("value does not fit into {}", stringify!($ty)))
-                        } else {
-                            Ok(raw as Self)
-                        }
+                        let raw = field
+                            .try_into_u128()
+                            .and_then(|val| <$uty>::try_from(val).ok())
+                            .ok_or_else(|| anyhow!("value does not fit into {}", stringify!($uty)))?;
+                        Ok(raw as $ty)
                     }
                     other => Err(anyhow!(
                         "expected field element for {}, got {other:?}",
@@ -117,7 +117,7 @@ macro_rules! impl_signed {
 }
 
 impl_unsigned!(u8, u16, u32, u64, u128, usize);
-impl_signed!(i8, i16, i32, i64, i128, isize);
+impl_signed!(i8 => u8, i16 => u16, i32 => u32, i64 => u64, i128 => u128, isize => usize);
 
 impl ToInputValue for FieldElement {
     fn to_input_value(&self) -> InputValue {

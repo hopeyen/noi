@@ -16,11 +16,25 @@ fn runs_add_function() {
 fn runs_mix_function() {
     let client = demo::Client::new(PROGRAM_DIR);
     let args = demo::mix::Args {
-        point: demo::Point { x: 2, y: 9 },
-        toggles: (true, [5, 7, 3]),
+        t: (4, true),
+        arr: [5, 7, 3],
     };
 
-    let point = demo::mix::simulate(&client, args).expect("simulate should succeed");
-    assert_eq!(point.x, 7);
-    assert_eq!(point.y, 12);
+    let tuple = demo::mix::simulate(&client, args).expect("simulate should succeed");
+    assert_eq!(tuple, (9, true));
+}
+
+#[test]
+fn runs_move_point() {
+    let client = demo::Client::new(PROGRAM_DIR);
+    let moved = demo::move_point::simulate(
+        &client,
+        demo::move_point::Args {
+            p: demo::P { x: 12, y: 8 },
+            dx: -2,
+        },
+    )
+    .expect("simulate should succeed");
+    assert_eq!(moved.x, 10);
+    assert_eq!(moved.y, 8);
 }

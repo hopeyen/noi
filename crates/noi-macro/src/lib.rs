@@ -114,7 +114,7 @@ fn generate_function_module(
     registry: &mut TypeRegistry,
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
     let module_ident = format_ident!("{}", sanitize_snake(&function.name));
-    let doc = function.signature();
+    let doc = format!("Noir signature: {}", function.signature());
 
     let params = build_param_specs(function, registry);
 
@@ -186,6 +186,7 @@ fn generate_function_module(
             #inputs_struct
             #converters
 
+            #[doc = #doc]
             pub type Output = #output_ty;
 
             #simulate_fn
@@ -447,8 +448,22 @@ impl Parse for MacroInput {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StructShape(Vec<(String, TypeRepr)>);
+
+impl StructShape {
+    fn from_struct(struct_ty: &StructType) -> Self {
+        let fields = struct_ty
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), field.ty.clone()))
+            .collect();
+        Self(fields)
+    }
+}
+
 struct TypeRegistry {
-    structs: IndexMap<StructType, Ident>,
+    structs: IndexMap<StructShape, Ident>,
     defs: Vec<proc_macro2::TokenStream>,
     module_name: String,
     counter: usize,
@@ -512,12 +527,13 @@ impl TypeRegistry {
     }
 
     fn ensure_struct(&mut self, struct_ty: &StructType) -> Ident {
-        if let Some(existing) = self.structs.get(struct_ty) {
+        let shape = StructShape::from_struct(struct_ty);
+        if let Some(existing) = self.structs.get(&shape) {
             return existing.clone();
         }
 
         let ident = self.next_struct_ident(struct_ty);
-        self.structs.insert(struct_ty.clone(), ident.clone());
+        self.structs.insert(shape, ident.clone());
 
         let mut field_tokens = Vec::new();
         let mut to_entries = Vec::new();
