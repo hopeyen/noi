@@ -1,13 +1,9 @@
-use std::path::Path;
-
-use anyhow::Result;
 use noi::nrg;
 
 nrg!(module = dark_pool);
 
-fn main() -> Result<()> {
-    let noir_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("noir");
-    let client = dark_pool::Client::new(&noir_dir);
+fn main() -> noi::Result<()> {
+    let client = dark_pool::Client::new();
 
     let matched = dark_pool::match_orders::simulate(
         &client,

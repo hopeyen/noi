@@ -1,12 +1,12 @@
+#![cfg(feature = "runner")]
+
 use noi::nrg;
 
-const PROGRAM_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/demo/noir");
-
-nrg!(module = demo);
+nrg!(module = demo, export_dir = "tests/fixtures/demo");
 
 #[test]
 fn runs_add_function() {
-    let client = demo::Client::new(PROGRAM_DIR);
+    let client = demo::Client::new();
     let result = demo::add::simulate(&client, demo::add::Args { a: 5, b: 6 })
         .expect("simulate should succeed");
     assert_eq!(result, 11);
@@ -14,7 +14,7 @@ fn runs_add_function() {
 
 #[test]
 fn runs_mix_function() {
-    let client = demo::Client::new(PROGRAM_DIR);
+    let client = demo::Client::new();
     let args = demo::mix::Args {
         t: (4, true),
         arr: [5, 7, 3],
@@ -26,7 +26,7 @@ fn runs_mix_function() {
 
 #[test]
 fn runs_move_point() {
-    let client = demo::Client::new(PROGRAM_DIR);
+    let client = demo::Client::new();
     let moved = demo::move_point::simulate(
         &client,
         demo::move_point::Args {

@@ -392,3 +392,29 @@ fn main() -> anyhow::Result<()> {
   ```
 * Derive `serde::{Serialize,Deserialize}` on generated `Args`/`Output`.
 * Pretty printers for `Field` & big integers.
+
+---
+
+## v0.0.2 — Runtime hardening, DX, and docs
+
+**Done**
+
+* Upgrade from Noir 0.36 to 1.0.0-beta.26 (crates, `nargo`, regenerated `export/` artifacts).
+* Replace `noir-runner` with an in-process executor on the Noir crates (`nargo`, `noirc_abi`,
+  `noirc_artifacts`, `bn254_blackbox_solver`); artifacts are embedded by `nrg!` and decoded once.
+* `noi::ExecutionError` (assertion messages), `execute()` + `Execution::witness_bytes()` as the
+  bridge to external provers.
+* ABI coverage: `databus` visibility, `str<N>`, `u1`; serde mirrors of `noirc_abi` types.
+* Codegen: only `::noi` paths, keyword escaping, path-based struct naming on collisions,
+  conditional `Default`, relative `export_dir` resolved against `CARGO_MANIFEST_DIR`.
+* `noi-build`: stage from `export/`, builder API, `NOI_SKIP_NARGO`, version-mismatch warnings.
+* Docs on every public item with runnable doctests; CI (fmt, clippy, tests per feature set, docs).
+* Milestone 7 proving (feature `prove`) via the `bb` CLI: `Prover`/`Proof`/`VerifierTarget`,
+  generated `prove`/`verify`/`verified_output`/`verification_key`/`solidity_verifier`, VK cache,
+  demo `above_threshold` export proved and verified by the example app. Noir does not allow `pub`
+  on `#[export]` parameters, so proofs expose the return value only.
+
+**Deferred to v0.0.3**
+
+* In-process proving (no `bb` subprocess) and recursion helpers.
+* Optional `serde` derives on generated types; source locations for failed assertions.

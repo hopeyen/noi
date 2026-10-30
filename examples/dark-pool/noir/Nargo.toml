@@ -2,6 +2,5 @@
 name = "dark_pool"
 type = "lib"
 authors = ["noi contributors"]
-compiler_version = "0.36.0"
 
 [dependencies]

@@ -18,19 +18,14 @@ proc-macro = true
 
 [features]
 default = []
+# Emit `program`/`execute`/`simulate` and value conversions (requires `noi-core/runner` at the call site).
 runner = []
 prove = []
 field = []
 
 [dependencies]
-anyhow.workspace = true
 heck.workspace = true
-indexmap.workspace = true
-itertools.workspace = true
-noi-core = { version = "0.0.1", default-features = false }
-proc-macro-error.workspace = true
+noi-core = { version = "0.0.2", default-features = false }
 proc-macro2.workspace = true
 quote.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 syn.workspace = true

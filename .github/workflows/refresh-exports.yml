@@ -15,4 +15,4 @@ jobs:
       - name: Refresh demo + dark-pool exports
         run: scripts/refresh_exports.sh
       - name: Ensure exports are committed
-        run: git diff --stat --exit-code
+        run: scripts/check_exports.py

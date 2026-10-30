@@ -6,7 +6,8 @@ CARGO_HOME="${ROOT_DIR}/target/cargo-home"
 RUSTUP_HOME="${ROOT_DIR}/target/rustup-home"
 export CARGO_HOME
 export RUSTUP_HOME
-NOIR_TAG="v0.36.0"
+# Keep in sync with the Noir crates in Cargo.toml and `noi_core::NOIR_VERSION`.
+NOIR_TAG="v1.0.0-beta.26"
 NARGO_BIN="${NARGO_BIN:-}"
 
 detect_target() {
@@ -80,7 +81,8 @@ ensure_nargo() {
     return
   fi
 
-  if command -v nargo >/dev/null 2>&1; then
+  # Only use a PATH nargo if it matches the pinned release; artifacts are version-specific.
+  if command -v nargo >/dev/null 2>&1 && nargo --version | grep -q "${NOIR_TAG#v}"; then
     NARGO_BIN="$(command -v nargo)"
     return
   fi
@@ -88,6 +90,12 @@ ensure_nargo() {
   local workspace_bin="${ROOT_DIR}/target/nargo/debug/nargo"
   if [ -x "$workspace_bin" ]; then
     NARGO_BIN="$workspace_bin"
+    return
+  fi
+
+  local installed_bin="${CARGO_HOME}/bin/nargo"
+  if [ -x "$installed_bin" ] && "$installed_bin" --version | grep -q "${NOIR_TAG#v}"; then
+    NARGO_BIN="$installed_bin"
     return
   fi
 
@@ -103,7 +111,8 @@ ensure_nargo() {
 
   echo "Failed to download prebuilt nargo; attempting cargo install (may require Rust downloads)" >&2
   cargo install --locked --git https://github.com/noir-lang/noir --tag "${NOIR_TAG}" nargo_cli
-  NARGO_BIN="$(command -v nargo)"
+  # Installed into the script-local CARGO_HOME, which is not on PATH.
+  NARGO_BIN="${CARGO_HOME}/bin/nargo"
 }
 
 refresh_program() {
@@ -117,6 +126,10 @@ main() {
 
   refresh_program "${ROOT_DIR}/examples/demo/noir"
   refresh_program "${ROOT_DIR}/examples/dark-pool/noir"
+
+  # The `noi` crate's doctests and integration tests use a copy of the demo artifacts.
+  rm -f "${ROOT_DIR}"/crates/noi/tests/fixtures/demo/*.json
+  cp "${ROOT_DIR}"/examples/demo/noir/export/*.json "${ROOT_DIR}/crates/noi/tests/fixtures/demo/"
 
   echo "Exports refreshed. Remember to commit any changed files under examples/*/noir/export/."
 }

@@ -34,3 +34,23 @@ fn touch_exports() {
         let _ = move_point(P { x: zero_u32, y: zero_u32 }, 0);
     }
 }
+
+#[export]
+fn checked_div(a: u32, b: u32) -> u32 {
+    assert(b != 0, "division by zero");
+    a / b
+}
+
+#[export]
+fn greet(name: str<5>) -> str<5> {
+    name
+}
+
+/// Proves `secret > threshold` without revealing `secret`.
+///
+/// Noir only allows `pub` on a program's `main`; for `#[export]` functions the ACIR return values
+/// are what a proof makes public. Returning `threshold` therefore commits the proof to it.
+#[export]
+fn above_threshold(threshold: u32, secret: u32) -> (u32, bool) {
+    (threshold, secret > threshold)
+}

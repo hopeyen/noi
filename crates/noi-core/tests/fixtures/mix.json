@@ -1,5 +1,4 @@
 {
-  "name": "mix",
   "abi": {
     "parameters": [
       {
@@ -8,8 +7,22 @@
           "kind": "struct",
           "path": "Point",
           "fields": [
-            { "name": "x", "type": { "kind": "integer", "sign": "unsigned", "width": 32 } },
-            { "name": "y", "type": { "kind": "integer", "sign": "unsigned", "width": 32 } }
+            {
+              "name": "x",
+              "type": {
+                "kind": "integer",
+                "sign": "unsigned",
+                "width": 32
+              }
+            },
+            {
+              "name": "y",
+              "type": {
+                "kind": "integer",
+                "sign": "unsigned",
+                "width": 32
+              }
+            }
           ]
         },
         "visibility": "private"
@@ -19,8 +32,18 @@
         "type": {
           "kind": "tuple",
           "fields": [
-            { "kind": "boolean" },
-            { "kind": "array", "length": 3, "type": { "kind": "integer", "sign": "unsigned", "width": 16 } }
+            {
+              "kind": "boolean"
+            },
+            {
+              "kind": "array",
+              "length": 3,
+              "type": {
+                "kind": "integer",
+                "sign": "unsigned",
+                "width": 16
+              }
+            }
           ]
         },
         "visibility": "public"
@@ -29,9 +52,24 @@
     "return_type": {
       "abi_type": {
         "kind": "struct",
+        "path": "Delta",
         "fields": [
-          { "name": "dx", "type": { "kind": "integer", "sign": "signed", "width": 32 } },
-          { "name": "dy", "type": { "kind": "integer", "sign": "signed", "width": 32 } }
+          {
+            "name": "dx",
+            "type": {
+              "kind": "integer",
+              "sign": "signed",
+              "width": 32
+            }
+          },
+          {
+            "name": "dy",
+            "type": {
+              "kind": "integer",
+              "sign": "signed",
+              "width": 32
+            }
+          }
         ]
       },
       "visibility": "private"

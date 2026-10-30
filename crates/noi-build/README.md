@@ -1,21 +1,19 @@
 # noi-build
 
-`noi-build` is a tiny helper crate meant to be used inside `build.rs`. It runs `nargo export` for you,
-mirrors the resulting JSON artifacts into `$OUT_DIR/noi_exports`, and emits the `NOI_EXPORT_DIR`
-environment variable so the `nrg!` macro knows where to look.
+`build.rs` helper for [`noi`](https://docs.rs/noi). It runs `nargo export` for your Noir package,
+stages the JSON artifacts in `$OUT_DIR/noi_exports`, sets `NOI_EXPORT_DIR` for the `nrg!` macro, and
+re-runs when your Noir sources change.
 
-## Example build script
 ```rust
-use std::{env, path::PathBuf};
-
+// build.rs
 fn main() {
-    let opts = noi_build::BuildOptions {
-        program_dir: PathBuf::from("./noir"),
-        out_dir: PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
-    };
-    noi_build::export(&opts).expect("nargo export failed");
+    noi_build::BuildOptions::from_env("noir") // Noir package dir, relative to Cargo.toml
+        .expect("OUT_DIR is set by cargo")
+        .export()
+        .expect("failed to export Noir artifacts");
 }
 ```
 
-Ship this crate with your own Noir project so any downstream crate can regenerate exports during
-`cargo build` without hand-rolling the `nargo` invocation.
+Without `nargo` installed it falls back to the artifacts committed in `<package>/export/` and emits a
+`cargo:warning`. Knobs: `NOI_NARGO_BIN`, `NOI_SKIP_NARGO=1`, `NOI_VERBOSE=1`. See the
+[docs](https://docs.rs/noi-build).

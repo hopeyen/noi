@@ -1,25 +1,22 @@
 # noi-core
 
-`noi-core` contains the shared data structures and helpers that power the rest of the `noi`
-workspace. It knows how to parse `nargo export` JSON, exposes strongly typed representations of Noir
-functions, and will eventually host the runtime helpers used by the facade crate.
+Schema and runtime layer behind [`noi`](https://docs.rs/noi). Use it directly for tooling around
+Noir `nargo export` artifacts, or to execute functions whose names are only known at run time.
 
-## Highlights
-- `noi_core::load_export_dir(path)` parses every JSON artifact in a directory and returns a typed
-  list of `ExportFunction`s.
-- Provides `TypeRepr`, `StructType`, `Param`, and related building blocks that `noi-macro` uses when
-  it emits Rust code.
-- Acts as the single source of truth for Noir ABI information so both proc-macro and runtime layers
-  stay in sync.
+- `noi_core::export`: parse artifact ABIs into `ExportFunction` / `TypeRepr` (no Noir compiler
+  dependency).
+- `noi_core::runtime` (feature `runner`, default): `Program::from_json(..).execute(..)` solves the
+  circuit in-process with the ACVM and returns the decoded output plus the witness.
 
-## Example
 ```rust
-use noi_core::load_export_dir;
+use noi_core::runtime::{Client, InputMap, Program, ToInputValue, FromOutputValue};
 
-fn dump_signature() -> anyhow::Result<()> {
-    for function in load_export_dir("./target/noi_exports")? {
-        println!("{}", function.signature());
-    }
-    Ok(())
-}
+let program = Program::from_file("noir/export/add.json")?;
+let mut inputs = InputMap::new();
+inputs.insert("a".into(), 2u32.to_input_value());
+inputs.insert("b".into(), 3u32.to_input_value());
+let out = program.execute(&Client::new(), &inputs)?.into_return_value().unwrap();
+assert_eq!(u32::from_output_value(out)?, 5);
 ```
+
+See the [docs](https://docs.rs/noi-core).

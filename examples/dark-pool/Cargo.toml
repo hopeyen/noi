@@ -8,9 +8,7 @@ rust-version.workspace = true
 build = "build.rs"
 
 [dependencies]
-anyhow.workspace = true
 noi = { path = "../../crates/noi" }
-noi-core = { path = "../../crates/noi-core" }
 
 [build-dependencies]
 noi-build = { path = "../../crates/noi-build" }

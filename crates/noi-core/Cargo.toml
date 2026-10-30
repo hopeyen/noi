@@ -13,25 +13,27 @@ readme = "README.md"
 keywords = ["noir", "zk", "bindings"]
 categories = ["cryptography"]
 
+[package.metadata.docs.rs]
+# Document the proving API too.
+all-features = true
+
 [features]
 default = ["runner"]
-runner = ["dep:noir-runner", "dep:acvm"]
-prove = []
+runner = ["dep:acvm", "dep:bn254_blackbox_solver", "dep:nargo", "dep:noirc_abi", "dep:noirc_artifacts"]
+prove = ["runner", "dep:tempfile"]
 field = ["dep:acvm"]
 
 [dependencies]
 anyhow.workspace = true
-camino.workspace = true
 "fs-err".workspace = true
-indexmap.workspace = true
-once_cell.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
-thiserror.workspace = true
-walkdir.workspace = true
 acvm = { workspace = true, optional = true }
-noir-runner = { workspace = true, optional = true }
+bn254_blackbox_solver = { workspace = true, optional = true }
+nargo = { workspace = true, optional = true }
+noirc_abi = { workspace = true, optional = true }
+noirc_artifacts = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
