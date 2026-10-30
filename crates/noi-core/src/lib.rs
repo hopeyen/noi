@@ -16,9 +16,9 @@
 //! # Inspecting exports
 //!
 //! ```
-//! # let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+//! # let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/demo");
 //! for function in noi_core::load_export_dir(dir)? {
-//!     println!("{}", function.signature()); // e.g. `fn add(pub a: u32, b: u32) -> pub u32`
+//!     println!("{}", function.signature()); // e.g. `fn add(a: u32, b: u32) -> u32`
 //! }
 //! # Ok::<(), anyhow::Error>(())
 //! ```

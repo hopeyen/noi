@@ -1,7 +1,8 @@
 //! Typed view of the JSON artifacts written by `nargo export`.
 //!
 //! `nargo export` compiles every function annotated with `#[export]` in a Noir library and writes
-//! one JSON program artifact per function into `<package>/export/<function>.json`
+//! one JSON program artifact per function into `<workspace>/export/<function>.json` (for a
+//! standalone package, `<package>/export/`)
 //! (see <https://noir-lang.org/docs/reference/nargo_commands#nargo-export>). Each artifact carries
 //! the compiled ACIR bytecode plus an ABI describing the function's parameters and return type.
 //!
@@ -15,10 +16,11 @@
 //! ```
 //! use noi_core::export::{load_export_dir, TypeRepr};
 //!
-//! # let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+//! # let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/demo");
 //! let functions = load_export_dir(dir)?;
 //! let add = functions.iter().find(|f| f.name == "add").unwrap();
-//! assert_eq!(add.signature(), "fn add(pub a: u32, b: u32) -> pub u32");
+//! assert_eq!(add.signature(), "fn add(a: u32, b: u32) -> u32");
+//! assert_eq!(add.public_parameters().count(), 0); // Noir 1.0 exports have no `pub` parameters
 //! assert_eq!(add.return_type, Some(TypeRepr::Unsigned(32)));
 //! # Ok::<(), anyhow::Error>(())
 //! ```
@@ -59,7 +61,8 @@ pub struct ExportFunction {
 }
 
 impl ExportFunction {
-    /// Renders a Noir-style signature, e.g. `fn add(pub a: u32, b: u32) -> u32`.
+    /// Renders a Noir-style signature, e.g. `fn add(a: u32, b: u32) -> u32` (`pub` appears only
+    /// for `main` program artifacts).
     ///
     /// Used for generated doc comments and diagnostics.
     pub fn signature(&self) -> String {
@@ -249,8 +252,9 @@ pub struct StructField {
 ///
 /// # Errors
 ///
-/// Fails if `dir` is missing or unreadable, if any artifact cannot be parsed (the error names the
-/// file and the JSON path), if two artifacts declare the same function, or if no artifacts exist.
+/// Fails if `dir` is missing or unreadable, if any artifact cannot be parsed or describes a type
+/// Noir cannot produce (the error names the file and, for malformed JSON, the line and column), if
+/// two artifacts declare the same function, or if no artifacts exist.
 pub fn load_export_dir(dir: impl AsRef<Path>) -> Result<Vec<ExportFunction>> {
     let dir = dir.as_ref();
     let entries = fs::read_dir(dir).with_context(|| {

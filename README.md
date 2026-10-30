@@ -39,8 +39,9 @@ The full API guide is in the [`noi` crate docs](https://docs.rs/noi).
   Artifacts from prereleases (such as `1.0.0-beta.N`) or other major/minor releases are rejected
   with a message naming both versions; see `noi::noir_version_compatible`.
 - To prove (feature `prove`): Barretenberg `bb` **6.0.0**, the release paired with Noir 1.0.0. Run
-  `bbup -v 6.0.0`, or `scripts/install_bb.sh`, which installs into `target/bb-bin/` without
-  editing your shell configuration.
+  `bbup -v 6.0.0` (puts `bb` on `PATH`), or `export NOI_BB_BIN="$(scripts/install_bb.sh)"`; the
+  script installs into `target/bb-bin/` without editing your shell configuration and prints the
+  binary path.
 
 Without `nargo`, `noi-build` stages the artifacts committed in `<package>/export/` and prints a
 `cargo:warning`, so `cargo build` still works (it uses whatever you last committed).
@@ -75,7 +76,9 @@ Without `nargo`, `noi-build` stages the artifacts committed in `<package>/export
    }
    ```
 5. Optionally run `nargo export` in the Noir package and commit `export/`, so machines without
-   `nargo` (CI, docs.rs, teammates) can still build.
+   `nargo` (CI, docs.rs, teammates) can still build. In a Nargo workspace, `nargo export` writes to
+   `<workspace>/export/`; copy this package's artifacts into `<package>/export/`, which is where
+   `noi-build` looks.
 
 Without a build script, point the macro at a directory instead:
 `noi::nrg!(module = demo, export_dir = "noir/export")`. Relative paths are resolved against the
@@ -202,7 +205,8 @@ a per-user directory there.
 - Tuples are limited to 12 elements (the standard library's trait coverage).
 - Adding a new artifact to an explicit `export_dir` is not noticed by cargo; use `noi-build`, or
   touch the file that invokes `nrg!`.
-- `noi-build` exports one Noir library package; for a Nargo workspace, point it at the member.
+- `noi-build` exports one Noir library package; for a Nargo workspace, point it at the member (and
+  see step 5 of "Using `noi` in your project" for committed artifacts).
 
 ## Workspace layout
 
@@ -230,7 +234,7 @@ helper (`noi-build`) is an ordinary library that depends only on the schema part
 
 ```bash
 cargo run -p noi-example-app                   # simulate add/mix/move_point
-cargo run -p noi-example-app --features prove  # also prove and verify (needs bb)
+NOI_BB_BIN="$(scripts/install_bb.sh)" cargo run -p noi-example-app --features prove  # also prove and verify
 cargo run -p noi-dark-pool-example
 ```
 

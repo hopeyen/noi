@@ -21,7 +21,7 @@ The Noir library exports:
 
 ```bash
 cargo run -p noi-example-app
-cargo run -p noi-example-app --features prove   # also proves and verifies; needs bb 6.0.0
+NOI_BB_BIN="$(scripts/install_bb.sh)" cargo run -p noi-example-app --features prove   # proves and verifies
 ```
 
 `src/main.rs` calls `simulate` for the first functions and, with `--features prove`, proves

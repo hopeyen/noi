@@ -139,7 +139,9 @@ impl Client {
     /// Handles calls to the Noir oracle `name` with `handler`.
     ///
     /// The handler receives the oracle's arguments and returns its results, in order. Returning an
-    /// error fails the execution with that error. Registering a name twice replaces the handler;
+    /// error fails the execution with an [`ExecutionError`] whose [`detail`](ExecutionError::detail)
+    /// names the oracle and includes the handler's message (with its context chain); the handler's
+    /// error value itself is not kept. Registering a name twice replaces the handler;
     /// registering `print` overrides the default of discarding print output.
     pub fn with_oracle<F>(mut self, name: impl Into<String>, handler: F) -> Self
     where

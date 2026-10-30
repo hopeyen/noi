@@ -41,14 +41,16 @@
 //! major/minor version), the artifacts committed in
 //! `<program_dir>/export/` are staged instead and a `cargo:warning` explains why. To support
 //! machines, CI runners, and docs.rs builds without the Noir toolchain, run `nargo export` in the
-//! package yourself and commit `export/`. Set `NOI_SKIP_NARGO=1` to always use the committed
-//! artifacts.
+//! package yourself and commit `export/`. `nargo export` writes to `export/` at the root of the
+//! Nargo workspace it runs in, so for a workspace member copy the member's artifacts from
+//! `<workspace>/export/` into `<program_dir>/export/`. Set `NOI_SKIP_NARGO=1` to always use the
+//! committed artifacts.
 //!
 //! # Environment variables
 //!
 //! | Variable | Effect |
 //! |---|---|
-//! | `NOI_NARGO_BIN` | `nargo` executable to run (default: `nargo` on `PATH`). Relative paths are resolved against the crate root. |
+//! | `NOI_NARGO_BIN` | `nargo` executable to run (default: `nargo` on `PATH`). A bare name (`nargo-1.0.0`) is looked up on `PATH`; a path with a directory (`./bin/nargo`) is resolved against the crate root. |
 //! | `NOI_SKIP_NARGO=1` | Do not run `nargo`; use committed artifacts. |
 //! | `NOI_VERBOSE=1` | Log each step to the build script's stderr (`cargo build -vv` shows it). |
 #![warn(missing_docs)]
@@ -65,8 +67,8 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use fs_err as fs;
 
-/// Directory, relative to the Noir package root, where `nargo export` writes artifacts and where
-/// committed fallback artifacts are read from.
+/// Directory, relative to the Noir package root, where committed fallback artifacts are read from.
+/// (`nargo export` itself writes to this directory at the root of its Nargo workspace.)
 pub const NARGO_EXPORT_DIR: &str = "export";
 /// Directory inside `OUT_DIR` where artifacts are staged for the macro.
 pub const STAGE_SUBDIR: &str = "noi_exports";
@@ -221,11 +223,29 @@ pub fn export(opts: &BuildOptions) -> Result<ExportSummary> {
             // Pick up `nargo export` runs and `git pull`s that update the committed artifacts.
             println!("cargo:rerun-if-changed={}", committed.display());
             let artifacts = stage(&committed, &stage_dir, None).with_context(|| {
-                format!(
+                let mut msg = format!(
                     "`nargo export` did not run ({reason}) and there are no committed artifacts \
                      in {}",
                     committed.display()
-                )
+                );
+                // nargo writes to `<workspace root>/export`, where the root is the topmost
+                // ancestor holding a Nargo.toml; point workspace users at it.
+                let workspace = program_dir
+                    .ancestors()
+                    .skip(1)
+                    .filter(|dir| dir.join("Nargo.toml").is_file())
+                    .last();
+                if let Some(root) = workspace {
+                    msg.push_str(&format!(
+                        ". This package is inside the Nargo workspace at {}, where `nargo export` \
+                         writes to {}; copy this package's artifacts from there into {} and \
+                         commit them",
+                        root.display(),
+                        root.join(NARGO_EXPORT_DIR).display(),
+                        committed.display()
+                    ));
+                }
+                msg
             })?;
             if !opts.skip_nargo {
                 println!(
@@ -270,9 +290,15 @@ fn resolve_program(bin: &Path) -> Result<Option<PathBuf>> {
         with_suffix.push(env::consts::EXE_SUFFIX);
         names.insert(0, with_suffix);
     }
-    Ok(env::split_paths(&paths)
+    let found = env::split_paths(&paths)
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-        .find(|candidate| candidate.is_file()))
+        .find(|candidate| candidate.is_file());
+    // A relative PATH entry (`./bin`) resolves against the current directory, but `nargo export`
+    // runs in another one; make the program absolute so both calls run the same binary.
+    found
+        .map(|p| std::path::absolute(&p))
+        .transpose()
+        .map_err(Into::into)
 }
 
 /// `base.join(rel)` with `.` and `..` resolved lexically, as nargo resolves dependency paths
@@ -526,7 +552,8 @@ fn normalize_file_map(artifact: &Path, package_dir: &Path) -> Result<()> {
     };
     // nargo clones git dependencies to `$HOME/nargo/<host>/<owner>/<repo>/<tag>`; record them as
     // `nargo/<host>/...` so no home directory leaks into the artifact.
-    let git_cache = env::var_os("HOME").map(|home| PathBuf::from(home).join("nargo"));
+    // `env::home_dir` matches how nargo finds its cache (`HOME` on Unix, the profile on Windows).
+    let git_cache = env::home_dir().map(|home| home.join("nargo"));
     for entry in files.values_mut() {
         let Some(path) = entry
             .get("path")
@@ -538,7 +565,12 @@ fn normalize_file_map(artifact: &Path, package_dir: &Path) -> Result<()> {
         if !path.is_absolute() {
             continue;
         }
-        let normalized = match git_cache.as_deref().and_then(|c| path.strip_prefix(c).ok()) {
+        // The package's own sources stay package-relative even when it lives under `~/nargo`.
+        let cached = git_cache
+            .as_deref()
+            .filter(|_| !path.starts_with(package_dir))
+            .and_then(|c| path.strip_prefix(c).ok());
+        let normalized = match cached {
             Some(rest) => Path::new("nargo").join(rest),
             None => relative_to(&path, package_dir),
         };
@@ -621,7 +653,11 @@ fn emit_rerun_directives(
         if !visited.insert(dir.clone()) {
             continue;
         }
-        println!("cargo:rerun-if-changed={}", manifest_path.display());
+        // Cargo treats a missing `rerun-if-changed` path as always stale, and a path dependency
+        // may be absent when the committed artifacts are used; only watch what exists.
+        if manifest_path.exists() {
+            println!("cargo:rerun-if-changed={}", manifest_path.display());
+        }
         let text = fs::read_to_string(&manifest_path).unwrap_or_default();
         let toml = text.parse::<toml::Table>().unwrap_or_default();
         let sources = entry_file(&dir, &toml);
@@ -808,6 +844,28 @@ mod tests {
             relative_to(Path::new("/x/y.nr"), Path::new("/a/b")),
             Path::new("/x/y.nr")
         );
+    }
+
+    #[test]
+    fn workspace_members_get_a_pointer_to_the_workspace_export_dir() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("Nargo.toml"),
+            "[workspace]\nmembers = [\"m\"]\n",
+        )
+        .unwrap();
+        let member = ws.path().join("m");
+        std::fs::create_dir_all(member.join("src")).unwrap();
+        std::fs::write(
+            member.join("Nargo.toml"),
+            "[package]\nname = \"m\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+        let err = BuildOptions::new(&member, ws.path().join("out"))
+            .skip_nargo(true)
+            .export()
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("Nargo workspace"), "{err:#}");
     }
 
     #[test]

@@ -59,7 +59,7 @@
 //!
 //! | Variable | Effect |
 //! |---|---|
-//! | `NOI_BB_BIN` | `bb` executable (default: `bb` on `PATH`). `scripts/install_bb.sh` installs the pinned release. |
+//! | `NOI_BB_BIN` | `bb` executable (default: `bb` on `PATH`). The repository's `scripts/install_bb.sh` installs the pinned release and prints its path for this variable. |
 //! | `NOI_CACHE_DIR` | Verification-key cache (default: `$XDG_CACHE_HOME/noi`, `~/Library/Caches/noi` on macOS, or `~/.cache/noi`). |
 //!
 //! `bb` downloads its CRS on first use; pass [`Prover::with_crs_path`] to use a local copy.

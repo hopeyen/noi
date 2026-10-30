@@ -11,7 +11,7 @@ This crate mirrors how a downstream project adopts `noi`:
 
 ```bash
 cargo run -p noi-example-app
-cargo run -p noi-example-app --features prove   # needs bb 6.0.0 (scripts/install_bb.sh)
+NOI_BB_BIN="$(scripts/install_bb.sh)" cargo run -p noi-example-app --features prove   # or bbup -v 6.0.0
 ```
 
 With `nargo` 1.0.x installed, the build re-exports from `./noir` whenever the Noir code changes.

@@ -13,6 +13,7 @@ fn main() {
 }
 ```
 
-If a compatible `nargo` (stable 1.0.x) is not available, it uses the artifacts committed in `<package>/export/` and
-emits a `cargo:warning`; a Noir compile error fails the build. Knobs: `NOI_NARGO_BIN`,
+If a compatible `nargo` (stable 1.0.x) is not available, it uses the artifacts committed in `<package>/export/`
+(for a Nargo workspace member, copy them there from `<workspace>/export/`) and emits a
+`cargo:warning`; a Noir compile error fails the build. Knobs: `NOI_NARGO_BIN`,
 `NOI_SKIP_NARGO=1`, `NOI_VERBOSE=1`. See the [docs](https://docs.rs/noi-build).

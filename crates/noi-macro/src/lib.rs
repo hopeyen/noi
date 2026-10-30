@@ -60,7 +60,16 @@ fn expand(input: &MacroInput) -> syn::Result<Tokens> {
     let span = input.module.span();
     let error = |msg: String| syn::Error::new(span, format!("nrg!: {msg}"));
 
-    let export_dir = resolve_export_dir(input)?;
+    let (export_dir, from_env) = resolve_export_dir(input)?;
+    // Proc-macro env reads are not tracked by cargo; `option_env!` in the output is, so a changed
+    // NOI_EXPORT_DIR (or NOI_DEBUG) rebuilds the bindings.
+    let track_export_dir = if from_env {
+        quote!(
+            const _: ::core::option::Option<&str> = ::core::option_env!("NOI_EXPORT_DIR");
+        )
+    } else {
+        Tokens::new()
+    };
     let functions =
         noi_core::load_export_dir(&export_dir).map_err(|err| error(format!("{err:#}")))?;
     let structs = collect_structs(&functions);
@@ -122,6 +131,7 @@ fn expand(input: &MacroInput) -> syn::Result<Tokens> {
         pub mod #module {
             // Makes cargo rebuild this crate when `NOI_DEBUG` changes, so the dump is written.
             const _: ::core::option::Option<&str> = ::core::option_env!("NOI_DEBUG");
+            #track_export_dir
             #client
             #(#struct_defs)*
             #(#function_modules)*
@@ -594,23 +604,26 @@ impl StructNames {
     }
 }
 
-fn resolve_export_dir(input: &MacroInput) -> syn::Result<PathBuf> {
+/// The export directory, and whether it came from `NOI_EXPORT_DIR`.
+fn resolve_export_dir(input: &MacroInput) -> syn::Result<(PathBuf, bool)> {
     if let Some(lit) = &input.export_dir {
         let path = PathBuf::from(lit.value());
         if path.is_relative() {
             if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
-                return Ok(PathBuf::from(manifest_dir).join(path));
+                return Ok((PathBuf::from(manifest_dir).join(path), false));
             }
         }
-        return Ok(path);
+        return Ok((path, false));
     }
-    env::var("NOI_EXPORT_DIR").map(PathBuf::from).map_err(|_| {
-        syn::Error::new(
-            input.module.span(),
-            "nrg!: no export directory. Either call `noi_build` from build.rs (it sets \
+    env::var("NOI_EXPORT_DIR")
+        .map(|dir| (PathBuf::from(dir), true))
+        .map_err(|_| {
+            syn::Error::new(
+                input.module.span(),
+                "nrg!: no export directory. Either call `noi_build` from build.rs (it sets \
              `NOI_EXPORT_DIR`), or pass `export_dir = \"path/to/noir/export\"`",
-        )
-    })
+            )
+        })
 }
 
 fn maybe_dump(module: &Ident, tokens: &Tokens) {
