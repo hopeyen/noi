@@ -146,7 +146,8 @@ pub enum TypeRepr {
     Bool,
     /// `Field`, an element of the proving backend's scalar field (BN254 for Barretenberg).
     Field,
-    /// `u1`, `u8`, `u16`, `u32`, `u64`, or `u128`. The payload is the bit width.
+    /// `u8`, `u16`, `u32`, `u64`, or `u128`. The payload is the bit width. (Width 1, the `u1` of
+    /// pre-1.0 Noir, is still accepted and maps to `bool`.)
     Unsigned(u16),
     /// `i8`, `i16`, `i32`, or `i64`. The payload is the bit width.
     Signed(u16),
@@ -372,18 +373,18 @@ pub(crate) fn checked_field_count(ty: &TypeRepr) -> Result<u64> {
         TypeRepr::String(len) => limit(Some(*len as u64)),
         TypeRepr::Array(inner, len) => limit(checked_field_count(inner)?.checked_mul(*len as u64)),
         TypeRepr::Tuple(items) => {
-            let mut sum = Some(0u64);
+            let mut sum = 0u64;
             for item in items {
-                sum = sum.and_then(|s| s.checked_add(checked_field_count(item).ok()?));
+                sum = limit(sum.checked_add(checked_field_count(item)?))?;
             }
-            limit(sum)
+            Ok(sum)
         }
         TypeRepr::Struct(st) => {
-            let mut sum = Some(0u64);
+            let mut sum = 0u64;
             for field in &st.fields {
-                sum = sum.and_then(|s| s.checked_add(checked_field_count(&field.ty).ok()?));
+                sum = limit(sum.checked_add(checked_field_count(&field.ty)?))?;
             }
-            limit(sum)
+            Ok(sum)
         }
     }
 }

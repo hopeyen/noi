@@ -8,8 +8,9 @@ The first release whose runtime works from crates.io: 0.0.1 shipped only the sch
 runtime depended on unpublished Noir crates.
 
 ### Changed (breaking)
-- Targets **Noir 1.0.0**: artifacts must be exported with `nargo` 1.0.0; others are rejected with
-  a message naming both versions. MSRV is Rust 1.89.
+- Targets **Noir 1.0**: artifacts must come from a stable `nargo` 1.0.x (1.0.0 recommended);
+  prereleases (e.g. `1.0.0-beta.N`) and other major/minor releases are rejected with a message
+  naming both versions. MSRV is Rust 1.89.
 - The runtime depends only on Noir crates published on crates.io (`acvm`, `acir_field`,
   `bn254_blackbox_solver` 1.0.0). `noir-runner` is gone; `simulate` runs from the artifact
   embedded by `nrg!`, decoded once and cached, with no per-call disk I/O.
@@ -23,8 +24,7 @@ runtime depended on unpublished Noir crates.
 - Generated code references only `::noi`, and which items exist follows the features of the
   `noi` crate it is compiled against (not the proc macro's host build). Crates using `nrg!` need
   no other direct dependency. `noi-macro` no longer has features.
-- `noi-build`: `BuildOptions::from_env`/`new` builders, `ExportSummary::source`. `nargo export`
-  runs on a temporary copy of the package, so the build never modifies the source tree;
+- `noi-build`: `BuildOptions::from_env`/`new` builders, `ExportSummary::source`. `nargo export` runs from a temporary directory with a generated `Nargo.toml` that references the package's entry file and path dependencies by absolute path (no source copy), so the build never modifies the source tree;
   committed `export/` artifacts are only read, as a fallback.
 - Struct naming: path-based names when short names collide, a `Noir` prefix for names that
   would shadow `Client` or prelude types (`NoirOption`), numbered names for generic
@@ -43,7 +43,8 @@ runtime depended on unpublished Noir crates.
 - `noi::ExecutionError` with the assertion message as nargo prints it (format strings filled in,
   out-of-bounds errors in the program's own coordinates) and the solver detail.
 - Execution of multi-circuit programs (`#[fold]`), Brillig, and oracles; `str<N>` (non-UTF-8
-  bytes decode lossily, as in nargo), `u1`, and `databus` ABI support; tuples up to 12 elements.
+  bytes decode lossily in simulation, as in nargo, and strictly in proven statements) and
+  `databus` ABI support; tuples up to 12 elements.
 - Artifacts are validated on load: invalid integer widths and encodings larger than `u32::MAX`
   field elements are rejected instead of overflowing later.
 - `noi::noir_version_compatible`, `NOIR_VERSION`, `BB_VERSION`.

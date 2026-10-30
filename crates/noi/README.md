@@ -25,6 +25,6 @@ fn main() {
 }
 ```
 
-Requires artifacts from Noir 1.0.0 (`noi::NOIR_VERSION`), Rust 1.89+, and, for proving, `bb`
-6.0.0. See the [API documentation](https://docs.rs/noi) for the generated code, type mapping,
+Requires artifacts from a stable Noir 1.0.x (`noi::NOIR_VERSION` = 1.0.0 recommended), Rust
+1.89+, and, for proving, `bb` 6.0.0. See the [API documentation](https://docs.rs/noi) for the generated code, type mapping,
 errors, oracles, and proving.

@@ -16,6 +16,7 @@ The Noir library exports:
 | `greet(name: str<5>) -> str<5>` | strings (exactly 5 bytes) |
 | `sum_of_squares(a: Field, b: Field) -> Field` | a `#[fold]` function, executed as a separate ACIR circuit |
 | `order_total(item: Field, qty: u32) -> Field` | an oracle (`get_price`) answered by `Client::with_oracle`, and a format-string assertion |
+| `pick(i: u32, points: [P; 2]) -> u32` | an out-of-range `i` fails with nargo's message, in the program's own array size and index |
 | `above_threshold(threshold: u32, secret: u32) -> (u32, bool)` | proving: returns `threshold` so the proof commits to it, while `secret` stays private |
 
 ```bash

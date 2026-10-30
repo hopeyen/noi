@@ -105,7 +105,7 @@
 //!
 //! | Noir | Rust |
 //! |---|---|
-//! | `bool`, `u1` | `bool` |
+//! | `bool` | `bool` |
 //! | `u8` … `u128`, `i8` … `i64` | `u8` … `u128`, `i8` … `i64` |
 //! | `Field` | [`FieldElement`] |
 //! | `[T; N]` | `[T; N]` |
@@ -238,8 +238,9 @@
 //!
 //! # Versions
 //!
-//! Artifacts must come from Noir [`NOIR_VERSION`] (`nargo --version`); `noi` rejects artifacts
-//! from other releases when they are first loaded, naming both versions.
+//! Artifacts must come from a stable Noir 1.0.x release ([`NOIR_VERSION`] recommended; check with
+//! `nargo --version`). `noi` rejects prereleases and other major/minor releases when an artifact is
+//! first loaded, naming both versions; see [`noir_version_compatible`].
 #![warn(missing_docs)]
 // Doc snippets show complete `build.rs` files, which need `fn main`.
 #![allow(clippy::needless_doctest_main)]

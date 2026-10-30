@@ -113,6 +113,10 @@ fn invalid_abis_are_rejected_on_load() {
     assert!(write(&int(32)).is_ok());
     assert!(format!("{:#}", write(&int(0)).unwrap_err()).contains("not a Noir integer"));
     assert!(format!("{:#}", write(&int(7)).unwrap_err()).contains("not a Noir integer"));
+    // Nested invalid widths name the real cause.
+    let nested = r#"{"abi":{"parameters":[{"name":"x","type":{"kind":"tuple","fields":[
+        {"kind":"integer","sign":"unsigned","width":7}]}}]}}"#;
+    assert!(format!("{:#}", write(nested).unwrap_err()).contains("not a Noir integer"));
     // 2^32 * 2^32 elements would overflow witness indices (and usize arithmetic on 32-bit hosts).
     let huge = r#"{"abi":{"parameters":[{"name":"x","type":{"kind":"array","length":4294967295,
         "type":{"kind":"array","length":4294967295,"type":{"kind":"field"}}}}]}}"#;

@@ -229,7 +229,7 @@ helper (`noi-build`) is an ordinary library that depends only on the schema part
 ## Running the examples
 
 ```bash
-cargo run -p noi-example-app                   # simulate, assertions, oracles
+cargo run -p noi-example-app                   # simulate add/mix/move_point
 cargo run -p noi-example-app --features prove  # also prove and verify (needs bb)
 cargo run -p noi-dark-pool-example
 ```

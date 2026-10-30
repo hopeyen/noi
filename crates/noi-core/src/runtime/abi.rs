@@ -158,11 +158,32 @@ pub(crate) fn decode_return(
     decode_value(&mut fields.into_iter(), ty, "return").map(Some)
 }
 
-/// Decodes one value of type `ty` from `fields`, validating every leaf.
+/// Decodes one value of type `ty` from `fields`, validating every leaf. Strings with non-UTF-8
+/// bytes are decoded lossily, as nargo does.
 pub(crate) fn decode_value(
     fields: &mut impl Iterator<Item = FieldElement>,
     ty: &TypeRepr,
     path: &str,
+) -> Result<Value> {
+    decode(fields, ty, path, false)
+}
+
+/// Like [`decode_value`], but a string with non-UTF-8 bytes is an error. Used for proven
+/// statements, where two different byte strings must never decode to the same value.
+#[cfg_attr(not(feature = "prove"), allow(dead_code))]
+pub(crate) fn decode_value_strict(
+    fields: &mut impl Iterator<Item = FieldElement>,
+    ty: &TypeRepr,
+    path: &str,
+) -> Result<Value> {
+    decode(fields, ty, path, true)
+}
+
+fn decode(
+    fields: &mut impl Iterator<Item = FieldElement>,
+    ty: &TypeRepr,
+    path: &str,
+    strict: bool,
 ) -> Result<Value> {
     let mut next = || {
         fields
@@ -199,25 +220,33 @@ pub(crate) fn decode_value(
                 .collect::<Result<Vec<u8>>>()?;
             // Noir strings may hold arbitrary bytes (`[u8; N].as_str_unchecked()`); decode them
             // lossily, like nargo, rather than failing a circuit that solved.
-            Value::String(String::from_utf8_lossy(&bytes).into_owned())
+            match String::from_utf8(bytes) {
+                Ok(s) => Value::String(s),
+                Err(e) if strict => bail!(
+                    "`{path}`: str<{len}> holds non-UTF-8 bytes {:02x?}; return `[u8; N]` to \
+                     commit to arbitrary bytes",
+                    e.as_bytes()
+                ),
+                Err(e) => Value::String(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+            }
         }
         TypeRepr::Array(inner, len) => Value::Array(
             (0..*len)
-                .map(|i| decode_value(fields, inner, &format!("{path}[{i}]")))
+                .map(|i| decode(fields, inner, &format!("{path}[{i}]"), strict))
                 .collect::<Result<_>>()?,
         ),
         TypeRepr::Tuple(types) => Value::Array(
             types
                 .iter()
                 .enumerate()
-                .map(|(i, ty)| decode_value(fields, ty, &format!("{path}.{i}")))
+                .map(|(i, ty)| decode(fields, ty, &format!("{path}.{i}"), strict))
                 .collect::<Result<_>>()?,
         ),
         TypeRepr::Struct(st) => Value::Struct(
             st.fields
                 .iter()
                 .map(|f| {
-                    let value = decode_value(fields, &f.ty, &format!("{path}.{}", f.name))?;
+                    let value = decode(fields, &f.ty, &format!("{path}.{}", f.name), strict)?;
                     Ok((f.name.clone(), value))
                 })
                 .collect::<Result<_>>()?,
@@ -293,9 +322,12 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_strings_decode_lossily() {
-        let out =
-            decode_value(&mut [f(97), f(0xfe)].into_iter(), &TypeRepr::String(2), "s").unwrap();
+    fn non_utf8_strings_decode_lossily_except_when_strict() {
+        let bytes = || [f(97), f(0xfe)].into_iter();
+        let out = decode_value(&mut bytes(), &TypeRepr::String(2), "s").unwrap();
         assert_eq!(out, Value::String("a\u{FFFD}".into()));
+        let ty = TypeRepr::Tuple(vec![TypeRepr::String(2)]);
+        let err = decode_value_strict(&mut bytes(), &ty, "r").unwrap_err();
+        assert!(err.to_string().contains("non-UTF-8"), "{err}");
     }
 }

@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # rust-toolchain.toml pins the development toolchain; override it for this job.
-      RUSTUP_TOOLCHAIN: "1.89"
+      RUSTUP_TOOLCHAIN: "1.89.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
@@ -70,7 +70,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --workspace --exclude noi-example-app --exclude noi-dark-pool-example
       - name: Licenses are packaged
-        run: for c in noi noi-core noi-build noi-macro; do tar -tzf target/package/$c-*.crate | grep -q '/LICENSE$'; done
+        run: |
+          v="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "noi") | .version')"
+          for c in noi noi-core noi-build noi-macro; do
+            tar -tzf "target/package/$c-$v.crate" | grep -qx "$c-$v/LICENSE" || { echo "::error::$c-$v.crate has no LICENSE"; exit 1; }
+          done
       - run: scripts/test_packaged.sh
 
   prove:

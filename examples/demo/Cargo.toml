@@ -1,6 +1,8 @@
 [package]
 name = "noi-example-app"
 version = "0.1.0"
+# Example code; never published.
+publish = false
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -19,16 +19,19 @@
 //! 2. Checks that the `nargo` it would run is a stable Noir 1.0.x release (see
 //!    [`noi_core::noir_version_compatible`]; 1.0.0 is recommended).
 //! 3. Runs `nargo export` in a temporary directory, with a `Nargo.toml` that points at your
-//!    package's entry file and path dependencies by absolute path. The build script therefore
-//!    never writes to your source tree. `file_map` paths in the artifacts are made relative to the
-//!    package, so builds are reproducible across machines.
+//!    package's entry file and path dependencies by absolute path; your sources are read in place
+//!    and the build script never writes to your source tree. `file_map` paths in the artifacts
+//!    are made relative to the package (git dependencies become `nargo/<host>/…`), so builds are
+//!    reproducible across machines.
 //! 4. Copies the resulting artifacts to `$OUT_DIR/noi_exports/` and emits
 //!    `cargo:rustc-env=NOI_EXPORT_DIR=…`, which is where `nrg!` looks by default.
 //! 5. Emits `cargo:rerun-if-changed` for `Nargo.toml` and the source directory (`src/`, or the
-//!    directory of `[package] entry`) of the package and every Noir path dependency, and for
-//!    `nargo` and its directory (or the `PATH` directories while it is missing), plus
-//!    `rerun-if-env-changed` for `PATH` and the variables below. Editing Noir code (including
-//!    adding files) or installing or upgrading `nargo` re-runs the export.
+//!    directory of `[package] entry`) of the package and every Noir path dependency, for `nargo`
+//!    and its directory, and for noirup's install directory (`$NARGO_HOME/bin`, default
+//!    `~/.nargo/bin`), plus `rerun-if-env-changed` for `PATH`, `NARGO_HOME`, and the variables
+//!    below. Editing Noir code (including adding files), changing `PATH`, or installing or
+//!    upgrading `nargo` with noirup re-runs the export. Installing `nargo` elsewhere on an
+//!    unchanged `PATH` is not noticed; run `cargo clean -p <your crate>` afterwards.
 //!
 //! A Noir compile error fails the build with `nargo`'s full output.
 //!
@@ -195,13 +198,18 @@ pub fn export(opts: &BuildOptions) -> Result<ExportSummary> {
                     noi_core::NOIR_VERSION
                 )),
                 // From here on, failures are real errors (e.g. Noir compile errors), not fallbacks.
-                Ok(_) => Ok(run_nargo_export(bin, &program_dir, &manifest)?),
+                Ok(_) => Ok(run_nargo_export(
+                    bin,
+                    &program_dir,
+                    &manifest,
+                    &opts.out_dir,
+                )?),
             },
         }
     };
 
     let (artifacts, source) = match fresh {
-        // `_work` keeps the temporary copy alive until the artifacts are staged.
+        // `_work` keeps the temporary package directory alive until the artifacts are staged.
         Ok((_work, exported)) => {
             let artifacts = stage(&exported, &stage_dir, Some(&program_dir)).with_context(|| {
                 "`nargo export` succeeded but produced no artifacts; mark functions with `#[export]`"
@@ -267,9 +275,27 @@ fn resolve_program(bin: &Path) -> Result<Option<PathBuf>> {
         .find(|candidate| candidate.is_file()))
 }
 
-/// An absolute path with symlinks resolved (on Unix), so relative `..` dependency paths mean what
-/// they mean when nargo runs in place. Windows keeps the plain absolute path, avoiding `\\?\`
-/// verbatim paths in the generated `Nargo.toml`.
+/// `base.join(rel)` with `.` and `..` resolved lexically, as nargo resolves dependency paths
+/// (`nargo_toml` + `fm::NormalizePath`). Symlinks inside a dependency path are deliberately not
+/// resolved, so transitive `../x` dependencies resolve exactly as when nargo runs in place.
+fn lexical_join(base: &Path, rel: &str) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in base.join(rel).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// An absolute path with symlinks resolved (on Unix). Used for the package directory, which is
+/// nargo's physical working directory when it runs in place. Windows keeps the plain absolute
+/// path, avoiding `\\?\` verbatim paths in the generated `Nargo.toml`.
 fn physical(path: &Path) -> Result<PathBuf> {
     if cfg!(unix) {
         if let Ok(path) = std::fs::canonicalize(path) {
@@ -352,7 +378,8 @@ fn entry_file(dir: &Path, toml: &toml::Table) -> PathBuf {
     }
 }
 
-/// Physical directories of the package's `path` dependencies, as declared in `Nargo.toml`.
+/// Directories of the package's `path` dependencies, as declared in `Nargo.toml` and resolved
+/// the way nargo resolves them.
 fn path_dependencies(manifest: &Manifest) -> Vec<PathBuf> {
     let dir = manifest.path.parent().unwrap_or(Path::new("."));
     manifest
@@ -362,11 +389,7 @@ fn path_dependencies(manifest: &Manifest) -> Vec<PathBuf> {
         .into_iter()
         .flat_map(|deps| deps.values())
         .filter_map(|dep| dep.get("path").and_then(|p| p.as_str()))
-        .map(|p| {
-            let joined = dir.join(p);
-            // Keep the joined path if it does not exist, so nargo reports the missing dependency.
-            physical(&joined).unwrap_or(joined)
-        })
+        .map(|p| lexical_join(dir, p))
         .collect()
 }
 
@@ -379,11 +402,9 @@ fn run_nargo_export(
     bin: &Path,
     program_dir: &Path,
     manifest: &Manifest,
+    out_dir: &Path,
 ) -> Result<(tempfile::TempDir, PathBuf)> {
-    let work = tempfile::Builder::new()
-        .prefix("noi-build-")
-        .tempdir()
-        .context("creating a temporary directory for nargo")?;
+    let work = nargo_workdir(out_dir)?;
     let package = work.path().join("package");
     fs::create_dir(&package)?;
 
@@ -399,8 +420,7 @@ fn run_nargo_export(
     if let Some(deps) = toml.get_mut("dependencies").and_then(|d| d.as_table_mut()) {
         for (_, dep) in deps.iter_mut() {
             if let Some(path) = dep.get("path").and_then(|p| p.as_str()) {
-                let joined = program_dir.join(path);
-                let absolute = physical(&joined).unwrap_or(joined);
+                let absolute = lexical_join(program_dir, path);
                 if let Some(dep) = dep.as_table_mut() {
                     dep.insert(
                         "path".into(),
@@ -437,6 +457,32 @@ fn run_nargo_export(
 }
 
 /// `path` relative to `base` (with `..` as needed), or `path` unchanged if they share no prefix.
+/// A temporary directory for nargo with no `Nargo.toml` in any ancestor: nargo treats the
+/// shallowest ancestor manifest as its workspace root, so a stray `/tmp/Nargo.toml` would hijack
+/// the export. Tries the system temp dir, then `out_dir`.
+fn nargo_workdir(out_dir: &Path) -> Result<tempfile::TempDir> {
+    let has_manifest_above = |dir: &Path| {
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        dir.ancestors().any(|a| a.join("Nargo.toml").exists())
+    };
+    for base in [env::temp_dir(), std::path::absolute(out_dir)?] {
+        fs::create_dir_all(&base)?;
+        let work = tempfile::Builder::new()
+            .prefix("noi-build-")
+            .tempdir_in(&base)
+            .context("creating a temporary directory for nargo")?;
+        if !has_manifest_above(work.path()) {
+            return Ok(work);
+        }
+    }
+    bail!(
+        "every candidate temporary directory ({} and {}) has a Nargo.toml in an ancestor, which \
+         nargo would treat as its workspace; remove it or set TMPDIR elsewhere",
+        env::temp_dir().display(),
+        out_dir.display()
+    )
+}
+
 fn relative_to(path: &Path, base: &Path) -> PathBuf {
     let (path_parts, base_parts): (Vec<_>, Vec<_>) =
         (path.components().collect(), base.components().collect());
@@ -445,7 +491,17 @@ fn relative_to(path: &Path, base: &Path) -> PathBuf {
         .zip(&base_parts)
         .take_while(|(a, b)| a == b)
         .count();
-    if common == 0 {
+    // Sharing only the root (`/`, or a drive prefix) means unrelated trees; keep the path.
+    let roots = path_parts
+        .iter()
+        .take_while(|c| {
+            matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Prefix(_)
+            )
+        })
+        .count();
+    if common <= roots {
         return path.to_path_buf();
     }
     let mut out = PathBuf::new();
@@ -468,6 +524,9 @@ fn normalize_file_map(artifact: &Path, package_dir: &Path) -> Result<()> {
     let Some(files) = json.get_mut("file_map").and_then(|m| m.as_object_mut()) else {
         return Ok(());
     };
+    // nargo clones git dependencies to `$HOME/nargo/<host>/<owner>/<repo>/<tag>`; record them as
+    // `nargo/<host>/...` so no home directory leaks into the artifact.
+    let git_cache = env::var_os("HOME").map(|home| PathBuf::from(home).join("nargo"));
     for entry in files.values_mut() {
         let Some(path) = entry
             .get("path")
@@ -476,10 +535,14 @@ fn normalize_file_map(artifact: &Path, package_dir: &Path) -> Result<()> {
         else {
             continue;
         };
-        if path.is_absolute() {
-            let relative = relative_to(&path, package_dir);
-            entry["path"] = serde_json::Value::String(relative.to_string_lossy().into_owned());
+        if !path.is_absolute() {
+            continue;
         }
+        let normalized = match git_cache.as_deref().and_then(|c| path.strip_prefix(c).ok()) {
+            Some(rest) => Path::new("nargo").join(rest),
+            None => relative_to(&path, package_dir),
+        };
+        entry["path"] = serde_json::Value::String(normalized.to_string_lossy().into_owned());
     }
     fs::write(artifact, serde_json::to_string(&json)?)?;
     Ok(())
@@ -596,15 +659,25 @@ fn emit_rerun_directives(
             );
         }
         None => {
-            if let Some(paths) = env::var_os("PATH") {
-                watch.extend(env::split_paths(&paths).filter(|d| d.is_dir()));
-            }
+            // Not PATH directories: on Windows cargo puts its own target directories on the build
+            // script's PATH, which would rerun every build. `rerun-if-env-changed=PATH` covers new
+            // PATH entries; watch noirup's install directory for installs into an existing one.
+            let nargo_home = env::var_os("NARGO_HOME")
+                .map(PathBuf::from)
+                .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".nargo")));
+            watch.extend(nargo_home.map(|h| h.join("bin")).filter(|d| d.is_dir()));
         }
     }
     for path in watch {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    for var in ["PATH", "NOI_NARGO_BIN", "NOI_SKIP_NARGO", "NOI_VERBOSE"] {
+    for var in [
+        "PATH",
+        "NARGO_HOME",
+        "NOI_NARGO_BIN",
+        "NOI_SKIP_NARGO",
+        "NOI_VERBOSE",
+    ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     Ok(())
@@ -715,6 +788,26 @@ mod tests {
             .export()
             .unwrap_err();
         assert!(err.to_string().contains("1.0.0-beta.26"), "{err}");
+    }
+
+    #[test]
+    fn dependency_paths_resolve_lexically() {
+        assert_eq!(
+            lexical_join(Path::new("/a/b/app"), "../dep"),
+            Path::new("/a/b/dep")
+        );
+        assert_eq!(
+            lexical_join(Path::new("/a/app"), "./x/../y"),
+            Path::new("/a/app/y")
+        );
+    }
+
+    #[test]
+    fn unrelated_trees_stay_absolute() {
+        assert_eq!(
+            relative_to(Path::new("/x/y.nr"), Path::new("/a/b")),
+            Path::new("/x/y.nr")
+        );
     }
 
     #[test]

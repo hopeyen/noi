@@ -85,6 +85,10 @@ use crate::runtime::{abi, Execution, FieldElement, Program, Value};
 /// dependency).
 pub const BB_VERSION: &str = "6.0.0";
 
+/// Upper bound on the size of a proof accepted by [`Prover::verify`]. bb 6 UltraHonk proofs are
+/// at most 458 words (14,656 bytes); anything far larger cannot verify.
+const MAX_PROOF_BYTES: usize = 64 * 1024;
+
 /// Where a proof will be verified. Selects the transcript hash and zero-knowledge setting; proofs
 /// and verification keys are only valid for the target they were made for.
 ///
@@ -186,7 +190,9 @@ impl Proof {
                 program.name()
             );
         }
-        abi::decode_value(&mut fields.into_iter(), ty, "return")
+        // Strict: a proven `str<N>` with non-UTF-8 bytes must not be collapsed into the same
+        // lossy string as a different statement.
+        abi::decode_value_strict(&mut fields.into_iter(), ty, "return")
             .map(Some)
             .with_context(|| format!("decoding the public inputs of `{}`", program.name()))
     }
@@ -382,18 +388,26 @@ impl Prover {
                 self.target
             );
         }
-        // Decode the statement exactly as `Proof::return_value` does; anything that is not the
-        // right number of canonical field elements is an invalid proof.
-        let Ok(public_inputs) = proof.public_inputs() else {
-            return Ok(false);
-        };
         let expected = program
             .function()
             .return_type
             .as_ref()
             .map_or(0, abi::field_count);
+        // Bound untrusted input before decoding it: honest proofs are a few hundred words, and the
+        // JSON handed to bb is about ten times the input size.
+        if proof.proof.len() > MAX_PROOF_BYTES || proof.public_inputs.len() != 32 * expected {
+            return Ok(false);
+        }
+        // Decode the statement exactly as `Proof::return_value` does, and require canonical
+        // proof words as bb does; anything else is an invalid proof.
+        let Ok(public_inputs) = proof.public_inputs() else {
+            return Ok(false);
+        };
         let (proof_words, rest) = proof.proof.as_chunks::<32>();
-        if public_inputs.len() != expected || !rest.is_empty() || proof_words.is_empty() {
+        if !rest.is_empty()
+            || proof_words.is_empty()
+            || decode_canonical_fields(&proof.proof, "proof").is_err()
+        {
             return Ok(false);
         }
         // Read the key first so a missing or unreadable cache entry is an error, not "invalid".
@@ -515,18 +529,16 @@ impl Prover {
         hasher.update(bb_version.as_bytes());
         let digest = hasher.finalize();
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = self
-            .cache_dir
-            .join(format!("{}-{}", sanitize_name(program.name()), &hex[..32]));
+        // Validate before trusting anything already in the cache, and use the resolved directory
+        // from here on so it cannot be swapped out underneath us.
+        let cache_dir = ensure_private_dir(&self.cache_dir)?;
+        let dir = cache_dir.join(format!("{}-{}", sanitize_name(program.name()), &hex[..32]));
         let vk = dir.join("vk");
-
-        // Validate before trusting anything already in the cache.
-        ensure_private_dir(&self.cache_dir)?;
         if vk.is_file() {
             return Ok(vk);
         }
 
-        let work = tempfile::tempdir_in(&self.cache_dir)
+        let work = tempfile::tempdir_in(&cache_dir)
             .context("creating a temporary directory in the noi cache")?;
         let bytecode = write_bytecode(program, work.path())?;
         let out = work.path().join("out");
@@ -610,17 +622,31 @@ fn bb_messages(output: &Output) -> String {
         .join("; ")
 }
 
-/// Interprets `bb verify -v`. bb 6 exits 1 for a rejected proof (`verified: 0`, sometimes with
-/// `Proof verification failed: invalid proof size …`) and also for tooling errors such as a
-/// malformed key (`Proof verification failed: invalid VK size …`); only the former means invalid.
+/// Interprets `bb verify -v`.
+///
+/// bb 6 exits 1 both for invalid proofs and for tooling errors, so the output decides:
+/// - `verified: 0` (sometimes with `Proof verification failed: invalid proof size …`) is a
+///   rejected proof;
+/// - after the key loaded (`vk hash in Oink verifier`), a proof that cannot be deserialized
+///   (`Deserialized point is not on the curve`, `… bad proof serde or parsing`) is also rejected;
+/// - anything else, such as `Proof verification failed: invalid VK size …`, is an error.
 fn classify_verify(output: &Output) -> Result<bool> {
     let messages = bb_messages(output);
-    let tooling_error = messages.split("; ").any(|line| {
+    let lines: Vec<&str> = messages.split("; ").collect();
+    let tooling_error = lines.iter().any(|line| {
         line.starts_with("Proof verification failed:") && !line.contains("invalid proof size")
+    });
+    let vk_loaded = lines
+        .iter()
+        .any(|line| line.starts_with("vk hash in Oink verifier"));
+    let bad_proof_encoding = lines.iter().any(|line| {
+        line.contains("Deserialized point is not on the curve")
+            || line.contains("usually implies some bad proof serde or parsing")
     });
     match output.status.code() {
         Some(0) if messages.contains("verified: 1") => Ok(true),
         Some(1) if messages.contains("verified: 0") && !tooling_error => Ok(false),
+        Some(1) if vk_loaded && bad_proof_encoding => Ok(false),
         _ => bail!("`bb verify` failed with {}: {messages}", output.status),
     }
 }
@@ -668,11 +694,12 @@ fn default_cache_dir() -> PathBuf {
     }
 }
 
-/// Creates `dir` (mode `0700` on Unix) and, on Unix, rejects it unless it is owned by the current
-/// user and not writable by group or others. Otherwise another local user could plant a
-/// verification key that makes forged proofs verify. Other platforms are not checked; keep
-/// `NOI_CACHE_DIR` in a per-user location there.
-fn ensure_private_dir(dir: &Path) -> Result<()> {
+/// Creates `dir` (mode `0700` on Unix) and returns it with symlinks resolved. On Unix, the
+/// resolved directory must be owned by the current user and not writable by group or others;
+/// otherwise another local user could plant a verification key that makes forged proofs verify.
+/// A symlink to a private directory (a cache relocated to another disk) is fine. Other platforms
+/// are not checked; keep `NOI_CACHE_DIR` in a per-user location there.
+fn ensure_private_dir(dir: &Path) -> Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -682,23 +709,28 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
             .mode(0o700)
             .create(dir)
             .with_context(|| format!("creating the noi cache at {}", dir.display()))?;
-        // `symlink_metadata`: a symlink planted in place of the cache must not redirect it.
-        let meta = fs::symlink_metadata(dir)?;
+        let real = fs::canonicalize(dir)
+            .with_context(|| format!("resolving the noi cache at {}", dir.display()))?;
+        let meta = fs::metadata(&real)?;
         // SAFETY: `geteuid` has no preconditions and cannot fail. Reading the uid this way (rather
         // than creating a probe file) keeps a read-only, pre-populated cache usable.
         let our_uid = unsafe { libc::geteuid() };
         if !meta.is_dir() || meta.uid() != our_uid || meta.mode() & 0o022 != 0 {
             bail!(
-                "refusing to use the noi cache at {}: it must be a directory owned by the current \
-                 user and not writable by group or others (run `chmod 700` on it, or set \
-                 NOI_CACHE_DIR)",
-                dir.display()
+                "refusing to use the noi cache at {} (resolved to {}): it must be a directory \
+                 owned by the current user and not writable by group or others (run `chmod 700` \
+                 on it, or set NOI_CACHE_DIR)",
+                dir.display(),
+                real.display()
             );
         }
+        Ok(real)
     }
     #[cfg(not(unix))]
-    fs::create_dir_all(dir)?;
-    Ok(())
+    {
+        fs::create_dir_all(dir)?;
+        Ok(std::path::absolute(dir)?)
+    }
 }
 
 fn write_bytecode(program: &Program, dir: &Path) -> Result<PathBuf> {

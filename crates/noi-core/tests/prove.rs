@@ -189,3 +189,52 @@ fn nul_terminated_json_public_inputs_are_rejected() {
         "NUL-terminated JSON must not reach bb"
     );
 }
+
+#[test]
+fn malformed_proofs_are_invalid_not_errors() {
+    let Some((prover, program, _cache)) = setup() else {
+        return;
+    };
+    let honest = prove(&prover, &program, 10, 42);
+    let tampered = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut bytes = honest.proof.clone();
+        edit(&mut bytes);
+        Proof::from_parts(bytes, honest.public_inputs.clone(), VerifierTarget::Default)
+    };
+    type Edit = Box<dyn Fn(&mut Vec<u8>)>;
+    let cases: [(&str, Edit); 4] = [
+        (
+            "commitment off the curve",
+            Box::new(|p| p[8 * 32 + 31] ^= 1),
+        ),
+        ("limb out of range", Box::new(|p| p[300] ^= 1)),
+        ("word above the modulus", Box::new(|p| p[..32].fill(0xff))),
+        (
+            "oversized",
+            Box::new(|p| p.extend(std::iter::repeat_n(0, 1 << 20))),
+        ),
+    ];
+    for (name, edit) in cases {
+        let result = prover.verify(&program, &tampered(&*edit));
+        assert!(
+            matches!(result, Ok(false)),
+            "{name}: expected Ok(false), got {result:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_private_cache_is_accepted() {
+    let Some((prover, program, _cache)) = setup() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let prover = prover.with_cache_dir(&link);
+    assert!(!prover.verification_key(&program).unwrap().is_empty());
+}

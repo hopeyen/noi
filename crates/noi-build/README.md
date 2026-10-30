@@ -1,7 +1,6 @@
 # noi-build
 
-`build.rs` helper for [`noi`](https://docs.rs/noi). It runs `nargo export` on a temporary copy of
-your Noir library package (your source tree is never modified), stages the JSON artifacts in
+`build.rs` helper for [`noi`](https://docs.rs/noi). It runs `nargo export` from a temporary directory whose `Nargo.toml` points at your Noir library package's entry file and path dependencies by absolute path (sources are read in place; your source tree is never written), stages the JSON artifacts in
 `$OUT_DIR/noi_exports`, sets `NOI_EXPORT_DIR` for the `nrg!` macro, and re-runs when your Noir
 sources, their path dependencies, or `nargo` change.
 
@@ -14,6 +13,6 @@ fn main() {
 }
 ```
 
-If `nargo` 1.0.0 is not available, it uses the artifacts committed in `<package>/export/` and
+If a compatible `nargo` (stable 1.0.x) is not available, it uses the artifacts committed in `<package>/export/` and
 emits a `cargo:warning`; a Noir compile error fails the build. Knobs: `NOI_NARGO_BIN`,
 `NOI_SKIP_NARGO=1`, `NOI_VERBOSE=1`. See the [docs](https://docs.rs/noi-build).

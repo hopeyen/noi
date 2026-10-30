@@ -415,7 +415,7 @@ fn main() -> noi::Result<()> {
   verification-key cache keyed by SHA-256, `bb` version pinning, canonical-input validation.
 * Codegen: `::noi`-only paths, `&Args` API, keyword escaping, generic-struct instantiations,
   reserved and colliding names, hygienic locals, clear errors for name collisions and >12-tuples.
-* `noi-build`: runs `nargo export` on a temporary copy (never writes the source tree), checks
+* `noi-build`: runs `nargo export` from a temporary manifest that points at the package's entry and path deps (never writes the source tree), checks
   package type and `nargo` version first, fails on Noir compile errors, tracks path deps.
 * Reproducible example and staged artifacts, CI (fmt, clippy, tests per feature set, proving with
   `bb`, real `nargo`, MSRV, packaging plus packaged tests, docs), crate-level guides with runnable
