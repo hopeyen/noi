@@ -4,12 +4,14 @@
 //! `noi-core` directly when you are writing tooling around Noir exports or need to call functions
 //! whose names are only known at run time.
 //!
-//! | Module | What it does | Needs the Noir compiler crates? |
+//! | Module | What it does | Extra dependencies |
 //! |---|---|---|
-//! | [`export`] | Parses the ABI of `nargo export` artifacts into [`ExportFunction`]s. Used by the macro. | No |
-//! | [`runtime`] | Executes artifacts and converts values (feature `runner`). | Yes |
-//! | `prove` | Proves/verifies with the `bb` CLI (feature `prove`). | Yes, plus `bb` at run time |
-//! | [`types`] | [`FieldElement`](types::FieldElement), available with or without `runner`. | Only with `runner`/`field` |
+//! | [`export`] | Parses the ABI of `nargo export` artifacts into [`ExportFunction`]s. Used by the macro. | none |
+//! | [`runtime`] | Executes artifacts and converts values (feature `runner`, default). | `acvm`, `bn254_blackbox_solver` |
+//! | `prove` | Proves and verifies with the `bb` CLI (feature `prove`). | `bb` 6.0.0 at run time |
+//! | [`types`] | [`FieldElement`](types::FieldElement), with or without `runner`. | `acir_field` with `runner`/`field` |
+//!
+//! Every dependency is published on crates.io.
 //!
 //! # Inspecting exports
 //!

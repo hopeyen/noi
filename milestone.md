@@ -1,6 +1,10 @@
 
 # `noi` – Milestone Specifications
 
+> Milestones 0–10 below are the original plan and are kept as a record. Where they disagree with
+> the code, the code and the [`noi` crate docs](crates/noi/src/lib.rs) win: the current API is
+> summarized in **API surface (current)** and the latest milestone section at the end.
+
 ## Product one‑liner
 
 > **`noi`**: a Rust crate that reads **`nargo export`** artifacts and generates **strongly‑typed Rust bindings** (like `sol!`) to **call, simulate, prove, and verify** Noir `#[export]` functions.
@@ -12,8 +16,8 @@
 
   ```rust
   noi::nrg!(module = math);       // reads export dir
-  let client = math::Client::new(program_dir)?;
-  let out = math::add::simulate(&client, math::add::Args{ a: 2u32, b: 3u32 })?;
+  let client = math::Client::new();
+  let out = math::add::simulate(&client, &math::add::Args { a: 2u32, b: 3u32 })?;
   ```
 * Optional proving (`prove`/`verify`) behind a feature flag.
 
@@ -309,31 +313,37 @@ noi/
 
 ---
 
-## API surface (initial)
+## API surface (current)
 
 ```rust
-// macro (noi-macro)
-noi::nrg!(module = mymod);                 // reads from NOI_EXPORT_DIR
-noi::nrg!(module = mymod, export_dir = "path/to/exports");
+// macro (noi-macro, re-exported as noi::nrg!)
+noi::nrg!(module = mymod);                         // reads NOI_EXPORT_DIR (set by noi-build)
+noi::nrg!(module = mymod, export_dir = "noir/export");
 
 // generated (per function)
 pub mod mymod {
-    #[derive(Clone)]
-    pub struct Client { /* program_dir, cache, … */ }
-    impl Client { pub fn new<P: Into<PathBuf>>(program_dir: P) -> Self { ... } }
+    pub use noi::Client;                           // oracle handlers + prover settings
+    pub struct SomeNoirStruct { /* … */ }
 
     pub mod add {
-        #[derive(Clone, Debug)] pub struct Args { pub a: u32, pub b: u32 }
+        pub const NAME: &str; pub const SIGNATURE: &str; pub const ARTIFACT_JSON: &str;
+        #[derive(Clone, Debug, PartialEq, Default)] pub struct Args { pub a: u32, pub b: u32 }
         pub type Output = u32;
 
-        pub fn simulate(client: &Client, args: Args) -> anyhow::Result<Output>;
-        #[cfg(feature="prove")]
-        pub fn prove(client: &Client, inputs: Inputs) -> anyhow::Result<Vec<u8>>;
-        #[cfg(feature="prove")]
-        pub fn verify(client: &Client, proof: &[u8]) -> anyhow::Result<()>;
+        pub fn simulate(client: &Client, args: &Args) -> noi::Result<Output>;
+        pub fn execute(client: &Client, args: &Args) -> noi::Result<noi::Execution>;
+        pub fn program() -> noi::Result<&'static noi::Program>;
+        #[cfg(feature = "prove")] pub fn prove(client: &Client, args: &Args) -> noi::Result<noi::Proof>;
+        #[cfg(feature = "prove")] pub fn verify(client: &Client, proof: &noi::Proof) -> noi::Result<bool>;
+        #[cfg(feature = "prove")] pub fn verified_output(client: &Client, proof: &noi::Proof) -> noi::Result<Output>;
+        #[cfg(feature = "prove")] pub fn verification_key(client: &Client) -> noi::Result<Vec<u8>>;
+        #[cfg(feature = "prove")] pub fn solidity_verifier(client: &Client) -> noi::Result<String>;
     }
 }
 ```
+
+The `Inputs`/`PublicInputs`/`PrivateInputs` split from Milestone 6 was removed in v0.0.2: Noir 1.0
+rejects `pub` on non-entry-point parameters, so a proof's public inputs are the return value.
 
 ---
 
@@ -342,26 +352,21 @@ pub mod mymod {
 **`examples/demo/build.rs`**
 
 ```rust
-use std::{env, path::PathBuf};
 fn main() {
-    let program_dir = PathBuf::from("noir");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    noi_build::export(&noi_build::BuildOptions { program_dir, out_dir })
-        .expect("nargo export failed");
-}
+    noi_build::BuildOptions::from_env("noir")
+        .and_then(|opts| opts.export())
+        .unwrap_or_else(|err| panic!("failed to export Noir artifacts: {err:#}"));
 }
 ```
 
 **`examples/demo/src/main.rs`**
 
 ```rust
-use noi::nrg; // re-exported proc macro
+noi::nrg!(module = demo); // reads NOI_EXPORT_DIR set by build.rs
 
-nrg!(module = demo); // reads NOI_EXPORT_DIR set by build.rs
-
-fn main() -> anyhow::Result<()> {
-    let client = demo::Client::new("./noir");
-    let out = demo::add::simulate(&client, demo::add::Args { a: 5, b: 6 })?;
+fn main() -> noi::Result<()> {
+    let client = demo::Client::new();
+    let out = demo::add::simulate(&client, &demo::add::Args { a: 5, b: 6 })?;
     assert_eq!(out, 11);
     Ok(())
 }
@@ -395,26 +400,28 @@ fn main() -> anyhow::Result<()> {
 
 ---
 
-## v0.0.2 — Runtime hardening, DX, and docs
+## v0.0.2 — Noir 1.0, publishable runtime, proving
 
 **Done**
 
-* Upgrade from Noir 0.36 to 1.0.0-beta.26 (crates, `nargo`, regenerated `export/` artifacts).
-* Replace `noir-runner` with an in-process executor on the Noir crates (`nargo`, `noirc_abi`,
-  `noirc_artifacts`, `bn254_blackbox_solver`); artifacts are embedded by `nrg!` and decoded once.
-* `noi::ExecutionError` (assertion messages), `execute()` + `Execution::witness_bytes()` as the
-  bridge to external provers.
-* ABI coverage: `databus` visibility, `str<N>`, `u1`; serde mirrors of `noirc_abi` types.
-* Codegen: only `::noi` paths, keyword escaping, path-based struct naming on collisions,
-  conditional `Default`, relative `export_dir` resolved against `CARGO_MANIFEST_DIR`.
-* `noi-build`: stage from `export/`, builder API, `NOI_SKIP_NARGO`, version-mismatch warnings.
-* Docs on every public item with runnable doctests; CI (fmt, clippy, tests per feature set, docs).
-* Milestone 7 proving (feature `prove`) via the `bb` CLI: `Prover`/`Proof`/`VerifierTarget`,
-  generated `prove`/`verify`/`verified_output`/`verification_key`/`solidity_verifier`, VK cache,
-  demo `above_threshold` export proved and verified by the example app. Noir does not allow `pub`
-  on `#[export]` parameters, so proofs expose the return value only.
+* Target Noir **1.0.0** (`nargo` 1.0.0) and Barretenberg **6.0.0**; MSRV Rust 1.89.
+* Runtime on crates.io-only Noir crates (`acvm`, `acir_field`, `bn254_blackbox_solver`): ABI codec
+  and multi-circuit executor reimplemented from `noirc_abi`/`nargo` (not published), artifacts
+  embedded by `nrg!` and decoded once. This makes all four crates publishable.
+* `Value`/`ToValue`/`FromValue`; `Client::with_oracle` handlers; `ExecutionError` with assertion
+  and format-string messages; `execute()` + `Execution::witness_bytes()`.
+* Milestone 7 proving (feature `prove`): `Prover`/`Proof`/`VerifierTarget`, generated
+  `prove`/`verify`/`verified_output`/`verification_key`/`solidity_verifier`, a private
+  verification-key cache keyed by SHA-256, `bb` version pinning, canonical-input validation.
+* Codegen: `::noi`-only paths, `&Args` API, keyword escaping, generic-struct instantiations,
+  reserved and colliding names, hygienic locals, clear errors for name collisions and >12-tuples.
+* `noi-build`: runs `nargo export` on a temporary copy (never writes the source tree), checks
+  package type and `nargo` version first, fails on Noir compile errors, tracks path deps.
+* Reproducible example artifacts, CI (fmt, clippy, tests per feature set, proving with `bb`,
+  MSRV, packaging, docs), crate-level guides with runnable doctests.
 
-**Deferred to v0.0.3**
+**Next**
 
-* In-process proving (no `bb` subprocess) and recursion helpers.
-* Optional `serde` derives on generated types; source locations for failed assertions.
+* In-process proving (Barretenberg bindings instead of the CLI) and recursion helpers.
+* Optional `serde` derives; Noir `Option<T>` mapped to Rust `Option<T>`; source locations for
+  failed assertions.

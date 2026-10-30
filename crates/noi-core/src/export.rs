@@ -47,9 +47,11 @@ pub struct ExportFunction {
     pub parameters: Vec<Param>,
     /// Return type, or `None` for functions returning `()`.
     pub return_type: Option<TypeRepr>,
-    /// Visibility of the return value (`pub` return values become public inputs of a proof).
+    /// Visibility of the return value as recorded in the ABI. Exported functions report
+    /// [`Private`](Visibility::Private), but `bb` still treats the return value of a circuit as its
+    /// public inputs.
     pub return_visibility: Visibility,
-    /// Compiler version recorded in the artifact (e.g. `1.0.0-beta.26+40d6574f…`), when present.
+    /// Compiler version recorded in the artifact (e.g. `1.0.0+275d3ab1…`), when present.
     pub noir_version: Option<String>,
     /// Path of the JSON artifact this function was loaded from.
     pub source_path: PathBuf,
@@ -78,7 +80,8 @@ impl ExportFunction {
         }
     }
 
-    /// Iterates over parameters that become public inputs of a proof (`pub` and databus params).
+    /// Iterates over parameters marked `pub` or `call_data`. Always empty for `#[export]`
+    /// functions in Noir 1.0; present for `main` program artifacts.
     pub fn public_parameters(&self) -> impl Iterator<Item = &Param> {
         self.parameters.iter().filter(|p| p.visibility.is_public())
     }
@@ -86,8 +89,10 @@ impl ExportFunction {
 
 /// Visibility of a parameter or return value in the Noir ABI.
 ///
-/// Mirrors `noirc_abi::AbiVisibility`. Only matters once proofs are involved: public values are
-/// revealed to the verifier, private values stay in the witness.
+/// Mirrors `noirc_abi::AbiVisibility`. Noir 1.0 only accepts `pub` and `call_data` on a program's
+/// `main`, so the parameters of `#[export]` functions are always [`Private`](Self::Private) and a
+/// proof's public inputs are the return value. The other variants appear in artifacts of `main`
+/// programs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
@@ -96,8 +101,8 @@ pub enum Visibility {
     /// The default; known only to the prover.
     #[default]
     Private,
-    /// Passed through the databus (`call_data(n)` / `return_data`). Used by recursive and
-    /// folding-based proving schemes; treated as public by `noi`.
+    /// Passed through the databus (`call_data(n)` / `return_data`), used by recursive and
+    /// folding-based proving schemes.
     #[serde(rename = "databus")]
     DataBus,
 }
@@ -564,7 +569,7 @@ mod tests {
     #[test]
     fn parses_modern_abi_kinds() {
         let json = r#"{
-            "noir_version": "1.0.0-beta.26",
+            "noir_version": "1.0.0",
             "abi": {
                 "abi_version": 1,
                 "parameters": [
