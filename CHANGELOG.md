@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.2] - Unreleased
+## [0.0.2] - 2026-10-30
 
 The first release whose runtime works from crates.io: 0.0.1 shipped only the schema, because the
 runtime depended on unpublished Noir crates.
