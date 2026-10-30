@@ -13,37 +13,27 @@ resolver = "2"
 authors = ["noi contributors"]
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.74"
-version = "0.0.1"
+# Matches the MSRV of the pinned Noir crates.
+rust-version = "1.89"
+version = "0.0.2"
 repository = "https://github.com/hopeyen/noi"
 homepage = "https://github.com/hopeyen/noi"
 documentation = "https://docs.rs/noi"
 
 [workspace.dependencies]
-acvm = { git = "https://github.com/noir-lang/noir", tag = "v0.36.0", package = "acvm" }
-noir-runner = { git = "https://github.com/noir-lang/noir-runner", rev = "2655620c6d0537bf6b4ddca2896283861090504f" }
+# Noir execution crates, from crates.io. Keep the version in sync with `noi_core::NOIR_VERSION`,
+# `scripts/refresh_exports.sh`, and the README; artifacts are decoded with the matching release.
+acir_field = { version = "1.0.0", features = ["bn254"] }
+acvm = { version = "1.0.0", default-features = false, features = ["bn254"] }
+bn254_blackbox_solver = "1.0.0"
 anyhow = "1.0"
-camino = "1.1"
+heck = "0.5"
 "fs-err" = "2.11"
-heck = "0.4"
-indexmap = { version = "2.2", features = ["serde"] }
-itertools = "0.12"
-once_cell = "1.19"
-proc-macro-error = "1.0"
 proc-macro2 = "1.0"
 quote = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_with = "3.8"
+sha2 = "0.10"
 syn = { version = "2.0", features = ["full"] }
-thiserror = "1.0"
 tempfile = "3.10"
-walkdir = "2.5"
-
-[patch.crates-io]
-noi-core = { path = "crates/noi-core" }
-noi-build = { path = "crates/noi-build" }
-noi-macro = { path = "crates/noi-macro" }
-noi = { path = "crates/noi" }
-# noir-runner pulls in noir_fuzzer, which still expects the rand 0.8-compatible proptest APIs.
-proptest = { git = "https://github.com/AltSysrq/proptest", rev = "0b4ffe8d08891b1bc14079b811a74df7f98dc4da" }
+toml = "0.8"

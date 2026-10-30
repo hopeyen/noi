@@ -1,348 +1,284 @@
 # noi
 
-`noi` takes the JSON artifacts produced by [`nargo export`](https://noir-lang.org/docs/noir/cli/nargo/#exporting-artifacts)
-and turns them into strongly typed Rust bindings—think Alloy’s `sol!`, but for Noir circuits. The
-workspace ships with runtime helpers, a build-script tool, a proc macro, and a runnable example so a
-backend team can call, simulate, and eventually prove Noir `#[export]` functions without copy/paste
-witness maps.
+`noi` turns the JSON artifacts produced by
+[`nargo export`](https://noir-lang.org/docs/reference/nargo_commands#nargo-export) into strongly
+typed Rust bindings, much as Alloy's `sol!` does for Solidity. You call, simulate, prove, and verify
+Noir `#[export]` functions from Rust as ordinary function calls, without hand-built witness maps.
+
+```rust
+noi::nrg!(module = demo); // generated from noir/export/*.json by noi-build
+
+fn main() -> noi::Result<()> {
+    let client = demo::Client::new();
+    let sum = demo::add::simulate(&client, &demo::add::Args { a: 5, b: 6 })?;
+    assert_eq!(sum, 11);
+    Ok(())
+}
+```
+
+The full API guide is in the [`noi` crate docs](https://docs.rs/noi).
 
 ## Why `noi`?
-- **Strong typing:** every Noir function produces an `Args` struct, an `Output` alias, and a
-  visibility-aware `Inputs` wrapper.
-- **Cargo-native build flow:** `noi-build` stages exports inside `build.rs`, copies JSON into
-  `OUT_DIR`, and sets `NOI_EXPORT_DIR` for the macro.
-- **Single macro integration:** `nrg!` emits per-function modules and a shared `Client` that
-  captures the Noir program directory.
-- **Deterministic codegen:** macro output depends solely on checked-in artifacts, producing
-  reviewable diffs and reproducible builds.
-- **Self-contained demo:** the repository ships with a demo Rust app + Noir program in one place so
-  newcomers can read and run the full workflow with a single `cargo run`.
-
-## Design goals & non-goals
-
-**Goals**
-- Give Rust devs Alloy-style, type-safe bindings over Noir `#[export]` functions.
-- Make simulation/proving/verification calls feel like normal Rust method calls instead of manual
-  witness plumbing.
-- Treat the exported schema as the single source of truth that backend, frontend, and smart-contract
-  teams can share.
-- Keep codegen deterministic so schema changes show up as compile errors and clean diffs.
-
-**Not trying to do (yet)**
-- Replace the Noir toolchain or compile `.nr` files—`noi` assumes `nargo export` already ran.
-- Support every backend permutation out of the gate; milestones start with the common runner and a
-  single proving backend.
-- Preserve backwards compatibility at all costs. If an API/layout tweak makes things easier, we’ll
-  take it.
+- **Strong typing:** every exported function gets an `Args` struct and an `Output` type, and every
+  Noir struct a Rust struct. ABI drift is a compile error.
+- **Runs in-process:** `simulate` solves the circuit with the ACVM inside your process. The
+  artifact is embedded in your binary, so neither `nargo` nor the Noir sources are needed at run
+  time.
+- **Proving built in:** with the `prove` feature, `prove`, `verify`, `verified_output`, and Solidity
+  verifier generation drive Barretenberg's `bb` CLI (UltraHonk).
+- **Cargo-native build flow:** `noi-build` runs `nargo export` from `build.rs` without touching your
+  source tree, and falls back to committed artifacts when `nargo` is unavailable.
+- **Useful errors:** a failing Noir `assert(cond, "message")` comes back as `noi::ExecutionError`
+  with the message, format strings filled in.
+- **Published on crates.io:** the runtime depends only on Noir crates that are on crates.io.
 
 ## Requirements
-- Rust stable toolchain (pinned via `rust-toolchain.toml`).
-- Noir toolchain with `nargo` ≥ `1.0.0-beta.15`. If `nargo` isn’t on PATH, `noi-build` quietly
-  copies the pre-exported fixtures under `examples/*/noir/export`, so `cargo check` keeps
-  working (but you won’t pick up schema changes until you run `nargo export`).
+- Rust 1.89 or newer (the MSRV of the Noir 1.0 crates). The repository pins 1.92 for development
+  (`rust-toolchain.toml`).
+- To export artifacts: a stable Noir **1.0.x** `nargo` (`noirup --version 1.0.0` recommended).
+  Artifacts from prereleases (such as `1.0.0-beta.N`) or other major/minor releases are rejected
+  with a message naming both versions; see `noi::noir_version_compatible`.
+- To prove (feature `prove`): Barretenberg `bb` **6.0.0**, the release paired with Noir 1.0.0. Run
+  `bbup -v 6.0.0` (puts `bb` on `PATH`), or `export NOI_BB_BIN="$(scripts/install_bb.sh)"`; the
+  script installs into `target/bb-bin/` without editing your shell configuration and prints the
+  binary path.
+
+Without `nargo`, `noi-build` stages the artifacts committed in `<package>/export/` and prints a
+`cargo:warning`, so `cargo build` still works (it uses whatever you last committed).
+
+## Using `noi` in your project
+1. Create a Noir **library** package (`nargo new --lib noir`) and mark functions with `#[export]`.
+2. Add the dependencies:
+   ```toml
+   [dependencies]
+   noi = "0.0.2"                       # features: "prove" for proving
+
+   [build-dependencies]
+   noi-build = "0.0.2"
+   ```
+3. Add a `build.rs`:
+   ```rust
+   fn main() {
+       noi_build::BuildOptions::from_env("noir") // relative to Cargo.toml
+           .and_then(|opts| opts.export())
+           .unwrap_or_else(|err| panic!("failed to export Noir artifacts: {err:#}"));
+   }
+   ```
+4. Generate and call the bindings:
+   ```rust
+   noi::nrg!(module = demo); // reads NOI_EXPORT_DIR, set by noi-build
+
+   fn main() -> noi::Result<()> {
+       let client = demo::Client::new();
+       let sum = demo::add::simulate(&client, &demo::add::Args { a: 5, b: 6 })?;
+       assert_eq!(sum, 11);
+       Ok(())
+   }
+   ```
+5. Optionally run `nargo export` in the Noir package and commit `export/`, so machines without
+   `nargo` (CI, docs.rs, teammates) can still build. In a Nargo workspace, `nargo export` writes to
+   `<workspace>/export/`; copy this package's artifacts into `<package>/export/`, which is where
+   `noi-build` looks.
+
+Without a build script, point the macro at a directory instead:
+`noi::nrg!(module = demo, export_dir = "noir/export")`. Relative paths are resolved against the
+crate's `Cargo.toml`.
+
+## What gets generated
+
+For `fn add(a: u32, b: u32) -> u32`, `nrg!(module = demo)` produces `demo::add::{Args, Output,
+simulate, execute, program}`, plus `prove`, `verify`, `verified_output`, `verification_key`, and
+`solidity_verifier` with the `prove` feature. Each Noir struct becomes `demo::<Name>`, and
+`demo::Client` holds execution settings such as oracle handlers. See
+[the crate docs](https://docs.rs/noi) for the exact signatures, the Noir-to-Rust type table, and
+naming rules for keywords, collisions, and generic structs.
+
+## Interaction patterns
+
+### Pattern A — Simulation in a backend
+
+```
+[request] → [Rust backend + noi] → simulate() → [typed result]
+```
+
+```rust
+noi::nrg!(module = finance);
+
+fn interest(principal: u64, rate: u64) -> noi::Result<u64> {
+    let client = finance::Client::new();
+    finance::interest::simulate(&client, &finance::interest::Args { principal, rate })
+}
+```
+
+### Pattern B — Backend proves, chain verifies *(feature `prove`)*
+
+```
+[user inputs] → [Rust backend + noi] → prove() → [proof + public output] → [Solidity verifier]
+```
+
+Noir only allows `pub` on a program's `main`, so `#[export]` functions have no public parameters:
+**a proof's public inputs are the function's return value**. Return whatever the verifier must
+see:
+
+```noir
+#[export]
+fn login(app_id: Field, secret: Field) -> Field {
+    assert(hash(secret) == REGISTERED); // `hash`: e.g. Poseidon2 from the noir-lang/poseidon library
+    app_id // public: the proof is bound to this app
+}
+```
+
+```rust
+use noi::{Prover, VerifierTarget};
+noi::nrg!(module = auth);
+
+fn prove_login(app_id: noi::FieldElement, secret: noi::FieldElement) -> noi::Result<noi::Proof> {
+    let client = auth::Client::new().with_prover(Prover::new().with_target(VerifierTarget::Evm));
+    auth::login::prove(&client, &auth::login::Args { app_id, secret })
+}
+
+// Once, at deploy time:
+// std::fs::write("Verifier.sol", auth::login::solidity_verifier(&client)?)?;
+```
+
+### Pattern C — Rust verifies incoming proofs *(feature `prove`)*
+
+```
+[browser prover (bb.js)] → (proof, public_inputs) → [Rust backend + noi] → verified_output()
+```
+
+```rust
+use noi::{Proof, VerifierTarget};
+noi::nrg!(module = attest);
+
+fn accept(proof: Vec<u8>, public_inputs: Vec<u8>) -> noi::Result<attest::attest::Output> {
+    let client = attest::Client::new();
+    let proof = Proof::from_parts(proof, public_inputs, VerifierTarget::Default);
+    // Fails unless the proof is valid; returns the proven statement, typed.
+    attest::attest::verified_output(&client, &proof)
+}
+```
+
+### Pattern D — Schema sharing only
+
+```
+[Noir prover elsewhere] ← schema → [Rust backend + noi (default-features = false)]
+```
+
+With `default-features = false`, `noi` generates only the types, without the Noir execution
+crates. Use them to validate and route data shaped like your circuit's inputs and outputs:
+
+```rust
+noi::nrg!(module = risk);
+
+fn check_score(score: &risk::score::Output) -> Result<(), String> {
+    if *score > 10_000 { Err("score out of bounds".into()) } else { Ok(()) }
+}
+```
+
+## Configuration
+
+| Variable | Used by | Effect |
+|---|---|---|
+| `NOI_EXPORT_DIR` | `nrg!` | Artifact directory; set automatically by `noi-build`. |
+| `NOI_NARGO_BIN` | `noi-build` | `nargo` to run (default: `nargo` on `PATH`). |
+| `NOI_SKIP_NARGO=1` | `noi-build` | Never run `nargo`; stage the committed `export/` artifacts. |
+| `NOI_VERBOSE=1` | `noi-build` | Log each step (visible with `cargo build -vv`). |
+| `NOI_DEBUG=1` | `nrg!` | Write the expanded code to `target/noi/<crate>/<module>.rs`. |
+| `NOI_BB_BIN` | `prove` | `bb` to run (default: `bb` on `PATH`). |
+| `NOI_CACHE_DIR` | `prove` | Verification-key cache (default: the per-user cache directory). |
+
+The verification-key cache is trusted: anyone who can write it can make forged proofs verify. On
+Unix, `noi` creates it with mode `0700` and refuses a directory that is not owned by the current
+user or that group/others can write. Other platforms get no such check, so keep `NOI_CACHE_DIR` in
+a per-user directory there.
+
+## Limitations
+- Proving shells out to the `bb` CLI, which must be installed wherever proofs are made or
+  verified.
+- bb's UltraHonk prover only accepts single-circuit programs: functions that call `#[fold]`
+  functions can be simulated but not proved (the prover says so before running `bb`).
+- `println` output from Noir is discarded; handle the `print` oracle with `Client::with_oracle` to
+  capture it raw.
+- Each instantiation of a generic Noir struct (`Option<u8>`, `Option<u32>`) is a separate Rust
+  struct (`NoirOption`, `NoirOption2`), because Noir's ABI does not record generic arguments.
+- Tuples are limited to 12 elements (the standard library's trait coverage).
+- Adding a new artifact to an explicit `export_dir` is not noticed by cargo; use `noi-build`, or
+  touch the file that invokes `nrg!`.
+- `noi-build` exports one Noir library package; for a Nargo workspace, point it at the member (and
+  see step 5 of "Using `noi` in your project" for committed artifacts).
 
 ## Workspace layout
 
 ```
 crates/
-  noi-core     # export schema + runtime glue
-  noi-build    # build.rs helper that stages exports into OUT_DIR
-  noi-macro    # `nrg!` proc macro
-  noi          # facade re-exporting runtime helpers + macro
+  noi-core     # export schema, runtime (ABI codec + ACVM executor), prover
+  noi-build    # build.rs helper that runs nargo export and stages artifacts
+  noi-macro    # nrg! proc macro
+  noi          # facade: re-exports + the user guide
 examples/
-  demo/
-    Cargo.toml
-    build.rs
-    src/main.rs
-    noir/       # embedded Noir project used by the demo (with fallback exports)
-  dark-pool/
-    Cargo.toml
-    build.rs
-    src/main.rs
-    noir/       # structs/arrays inspired by Mezcal’s dark-pool prototype
+  demo/        # noi-example-app: every feature, including proving (`--features prove`)
+  dark-pool/   # noi-dark-pool-example: structs and arrays from an order-matching circuit
+scripts/
+  refresh_exports.sh   # re-export example artifacts with the pinned nargo
+  install_bb.sh        # install the pinned bb into target/bb-bin/
+  check_exports.py     # CI: fail if committed artifacts are stale
+  publish.sh           # publish all crates in dependency order
 ```
 
-Bundling the Noir sources inside each example crate means `cargo run -p ...` has everything it needs
-without juggling extra paths. The `dark-pool` variant nods to
-[Mezcal](https://github.com/nemi-fi/mezcal) and shows how realistic structs/arrays look after
-codegen.
+A proc-macro crate can export only procedural macros, so `nrg!` lives in `noi-macro`. The build
+helper (`noi-build`) is an ordinary library that depends only on the schema part of `noi-core`, so
+`build.rs` does not compile the ACVM runtime or the prover. `noi` re-exports everything.
 
-## Architecture snapshot
-- `noi-core`: owns the export schema (`ExportFunction`, `Param`, `TypeRepr`), filesystem loader,
-  and future runtime hooks (`simulate`, `prove`, `verify`).
-- `noi-build`: intended for `build.rs`; runs `nargo export`, mirrors JSON into
-  `target/.../noi_exports/`, and sets `NOI_EXPORT_DIR`.
-- `noi-macro`: implements `nrg!`, reading staged JSON to generate typed modules, structs, and
-  client helpers.
-- `noi`: thin facade that re-exports runtime types and the macro.
-
-### Why multiple crates instead of a monolith?
-- Proc macros (`noi-macro`) must live in their own crate and can’t depend on the runtime crate, so
-  the macro and the facade (`noi`) stay separate.
-- Build scripts can’t link against proc-macro crates, so `noi-build` is a lightweight helper that
-  downstream `build.rs` files can depend on without weird coupling.
-- `noi-core` holds the shared schema/runtime types so both the macro and the facade reuse the same
-  logic without circular deps.
-Collapsing everything into one crate would run into Cargo rules immediately, so the “multi-crate
-but colocated” structure keeps things navigable and practical.
-
-## Crate usage examples
-
-Most folks will just `cargo add noi`, but if you need to hook into a specific layer, here’s how each
-crate looks in isolation.
-
-### `noi-build` (build.rs helper)
-
-```rust
-// build.rs
-use std::{env, path::PathBuf};
-
-fn main() {
-    let opts = noi_build::BuildOptions {
-        program_dir: PathBuf::from("./noir"),
-        out_dir: PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
-    };
-    noi_build::export(&opts).expect("nargo export failed");
-}
-```
-
-### `noi-macro` / `nrg!`
-
-```rust
-use noi::nrg;
-
-nrg!(module = voting, export_dir = "./target/noi_exports");
-
-fn main() -> anyhow::Result<()> {
-    let client = voting::Client::new("./noir");
-    let result = voting::tally::simulate(&client, voting::tally::Args { yes: 10, no: 4 })?;
-    println!("tally = {result}");
-    Ok(())
-}
-```
-
-### `noi-core` (raw schema loader)
-
-```rust
-use noi_core::load_export_dir;
-
-fn print_exports() -> anyhow::Result<()> {
-    let exports = load_export_dir("./target/noi_exports")?;
-    for function in exports {
-        println!("{}", function.signature());
-    }
-    Ok(())
-}
-```
-
-### `noi` facade
-
-The `noi` crate re-exports both `nrg!` and the runtime helpers so downstream code usually depends on
-it exclusively: `cargo add noi --path crates/noi`.
-
-## Interaction patterns with Noir
-
-The diagrams below highlight where `noi` sits when Rust talks to Noir, frontends, and verifiers.
-Each pattern lines up with the design goals above and includes a short snippet from `nrg!` output.
-
-### Pattern A — Pure simulation (no proof)
-
-```
-[Client request] → [Rust backend + noi::nrg!] → [Noir runner] → [Result JSON]
-```
-
-```rust
-use noi::nrg;
-nrg!(module = finance);
-
-fn check() -> anyhow::Result<u64> {
-    let client = finance::Client::new("./noir");
-    let out = finance::interest::simulate(&client, finance::interest::Args { principal: 1_000, rate: 350 })?;
-    Ok(out)
-}
-```
-
-### Pattern B — Backend proves, chain verifies
-
-```
-[User inputs]
-     ↓
-[Rust backend + noi]
-     │ prove()
-     ↓
-[Proof + public inputs]
-     ↓
-[Smart contract verifier]
-```
-
-```rust
-use noi::nrg;
-nrg!(module = auth);
-
-fn prove_login(req: LoginRequest) -> anyhow::Result<ProofPayload> {
-    let client = auth::Client::new("./noir");
-    let inputs = auth::login::Inputs {
-        public: auth::login::PublicInputs { app_id: req.app_id },
-        private: auth::login::PrivateInputs { secret: req.secret },
-    };
-    let proof = auth::login::prove(&client, inputs.clone())?;
-    Ok(ProofPayload { proof, public_inputs: inputs.public })
-}
-```
-
-### Pattern C — Rust verifies incoming proofs
-
-```
-[Browser/wallet prover] → (proof, public_inputs) → [Rust backend + noi] → verify() → decision
-```
-
-```rust
-use noi::nrg;
-nrg!(module = attest);
-
-fn verify_submission(proof: Vec<u8>, public: attest::attest::PublicInputs) -> anyhow::Result<()> {
-    let client = attest::Client::new("./noir");
-    attest::attest::verify(&client, &proof, public)
-}
-```
-
-### Pattern D — Coordinator only (schema sharing)
-
-```
-[Noir prover in WASM] ← schema → [Rust backend + noi] → validates public inputs / relays proofs
-```
-
-Even if Rust never calls `simulate`/`prove`, the generated structs describe the Noir interface:
-
-```rust
-use noi::nrg;
-nrg!(module = risk);
-
-fn validate_public_inputs(data: &risk::score::PublicInputs) -> anyhow::Result<()> {
-    if data.score > 10_000 { anyhow::bail!("score out of bounds") }
-    Ok(())
-}
-```
-
-## Production & publication status
-`noi` is **pre-release/alpha**. Codegen and the `simulate` path are wired through the
-[`noir-runner`](https://github.com/noir-lang/noir-runner) crate, so you can exercise Noir exports
-from Rust today. The proving/verification helpers are still placeholders until milestone 7 lands.
-Publishing to crates.io will happen once those runtime APIs stabilize.
-
-## Using `noi` in your project
-1. Add dependencies (path-based until the crates are published):
-   ```bash
-   cargo add noi --path crates/noi
-   cargo add noi-build --path crates/noi-build
-   ```
-2. Create or update your project’s `build.rs`:
-   ```rust
-   use std::{env, path::PathBuf};
-
-   fn main() {
-       let opts = noi_build::BuildOptions {
-           program_dir: PathBuf::from("path/to/noir/project"),
-           out_dir: PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
-       };
-       noi_build::export(&opts).expect("nargo export failed");
-   }
-   ```
-3. Invoke `nrg!` inside your crate:
-   ```rust
-   use noi::nrg;
-
-   nrg!(module = demo); // reads NOI_EXPORT_DIR emitted by build.rs
-
-   fn main() -> anyhow::Result<()> {
-       let noir_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("path/to/noir/project");
-       let client = demo::Client::new(noir_dir);
-       let args = demo::add::Args { a: 5, b: 6 };
-       let sum = demo::add::simulate(&client, args)?;
-       assert_eq!(sum, 11);
-       Ok(())
-   }
-   ```
-
-## Running the bundled demo
-1. Install `nargo` (optional but recommended for fresh exports).
-2. From the repo root, run:
-   ```bash
-   cargo run -p noi-example-app
-   ```
-   The example crate lives at `examples/demo/` and embeds its Noir project under `examples/demo/noir`.
-   The build script stages exports from that directory, the macro generates bindings, and the binary
-   executes real Noir code (falling back to the checked-in JSON fixtures when `nargo` is missing).
-   See `examples/README.md` for a deeper walkthrough of the demo.
-
-Want something closer to production? Try the dark-pool flavored example:
+## Running the examples
 
 ```bash
+cargo run -p noi-example-app                   # simulate add/mix/move_point
+NOI_BB_BIN="$(scripts/install_bb.sh)" cargo run -p noi-example-app --features prove  # also prove and verify
 cargo run -p noi-dark-pool-example
 ```
-It follows the same structure but uses Noir circuits inspired by the
-[Mezcal](https://github.com/nemi-fi/mezcal) project to showcase structs, arrays, and public/private
-inputs.
 
-## Detailed behavior & knobs
-- `NOI_EXPORT_DIR`: automatically set by `noi-build`, but you can override it manually when calling
-  `nrg!` (e.g., `nrg!(module = demo, export_dir = "../export")`).
-- `NOI_DEBUG=1`: when set, the macro dumps the expanded Rust code into `target/noi/expanded.rs` for
-  inspection and IDE completion debugging.
-- `NOI_NARGO_BIN`: optional path to a custom `nargo` binary for environments that pin toolchains.
-- Visibility metadata: parameters tagged `public` go into the generated `PublicInputs`, while
-  everything else lands in `PrivateInputs`. The macro also provides `From<Args> for Inputs` and the
-  reverse, so you can ergonomically switch representations.
+See [`examples/README.md`](examples/README.md) for what each example covers.
 
-## Limitations & open work
-- `simulate` already talks to Noir via `noir-runner`; `prove`/`verify` will be implemented in
-  the proving milestones.
-- Type coverage currently includes primitives, field elements, fixed arrays, tuples, and structs.
-  Extend `TypeRepr` + fixtures before relying on additional Noir features.
-- `noi-build` expects a `Nargo.toml` with sources under `src/`. Custom layouts must copy JSON into
-  their own `noi_exports` directories before invoking `nrg!`.
+## Development
+- Format: `cargo fmt --all`
+- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- Test: `cargo test --workspace`; with proving: `NOI_BB_BIN=$(scripts/install_bb.sh) cargo test --workspace --features noi/prove,noi-core/prove`
+- Package: `cargo package --workspace --exclude noi-example-app --exclude noi-dark-pool-example`
+  builds every crate from its packaged sources, as `cargo publish` does; then
+  `scripts/test_packaged.sh` runs each packaged crate's own tests.
+- MSRV: `cargo +1.89 check --workspace --all-targets --all-features`.
 
-## Development workflow
-- Format: `cargo fmt`
-- Lint: `cargo clippy --workspace --all-features -D warnings`
-- Test: `cargo test --workspace`
-- Review the stricter engineering standards in `AGENTS.md` before opening a PR. The milestones
-  listed in `milestone.md` define the scope and acceptance tests for each iteration.
+Read `AGENTS.md` for engineering standards and `milestone.md` for scope.
 
 ### Refreshing Noir exports
-- Run `scripts/refresh_exports.sh` whenever you change the Noir sources under `examples/*/noir/`.
-  The script downloads a prebuilt `nargo` release from GitHub (or reuses an existing binary) and
-  runs `nargo export` for the demo and dark-pool programs so the checked-in `export/` artifacts stay
-  in sync with the Rust fixtures. Set `NARGO_BIN=/path/to/nargo` if you already have a binary handy.
-- CI executes the same script (see `.github/workflows/refresh-exports.yml`) and fails when the
-  committed exports drift, so keeping `export/` up to date locally avoids review churn.
+Run `scripts/refresh_exports.sh` after changing Noir code under `examples/*/noir/`. It fetches
+`nargo` 1.0.0 (prebuilt release, or `cargo install` as a fallback), re-exports both examples,
+makes the artifacts reproducible (repository-relative source paths), and copies the demo artifacts
+into the `noi` and `noi-core` test fixtures. CI runs it followed by `scripts/check_exports.py` and
+fails if the committed artifacts differ.
 
-## Publishing crates
-- `noi-core`, `noi-build`, and `noi-macro` must be published before `noi` because the facade depends
-  on them.
-- Use the helper script to publish in order (pass `--dry-run` while testing):
-
-  ```bash
-  chmod +x scripts/publish.sh
-  scripts/publish.sh --dry-run
-  scripts/publish.sh          # real publish once satisfied
-  ```
-
-  The script calls `cargo publish -p <crate>` for each crate in dependency order, so the final crate
-  on crates.io is `noi`—the user-facing package name you asked for.
+### Releasing
+1. Bump `version` in the root `Cargo.toml` and the internal dependency versions.
+2. Update `CHANGELOG.md`.
+3. Run the package command above, then `scripts/publish.sh --dry-run`, then `scripts/publish.sh`.
 
 ## Troubleshooting
-- **`nargo` missing:** builds succeed using the fallback exports but log a warning. Install `nargo`
-  to regenerate fresh JSON.
-- **`NOI_EXPORT_DIR` not set:** ensure `noi-build::export` ran inside your `build.rs`. It emits the
-  proper env var automatically.
-- **Unsupported Noir type:** extend `TypeRepr`, add fixtures under `crates/noi-core/tests/fixtures/`,
-  and expand the macro’s type mapping.
+- **"artifact … was built by Noir X"**: re-export with `nargo` 1.0.0.
+- **"no handler for oracle `name`"**: the circuit calls an oracle; register it with
+  `Client::with_oracle`.
+- **"`bb` is bb X, but noi requires bb 6.0.0"**: install the paired release, or opt out with
+  `Prover::allow_any_bb_version(true)`.
+- **"nrg!: no export directory"**: call `noi_build` from `build.rs` (it sets `NOI_EXPORT_DIR`),
+  or pass `export_dir = "path/to/noir/export"` to `nrg!`.
+- **"… calls `#[fold]` functions … only supports single-circuit programs"**: remove `#[fold]` from
+  functions you need to prove.
 
 ## Roadmap
-- Milestone 4 (done): integrate the Noir runner crate so `simulate` produces real outputs.
-- Milestone 5+: expand type coverage (done), add public/private input ergonomics (done), and wire
-  proving paths (blocked until Noir exposes a reusable prover API; currently only the `nargo
-  prove/verify` CLI exists, so we can’t offer `noi-core::prove/verify` without reimplementing the
-  upstream proving stack).
-- Milestone 9+: ship documentation + examples polished enough for crates.io publication.
+- **v0.0.1:** export schema, `nrg!` codegen, `noi-build` (schema only on crates.io).
+- **v0.0.2:** Noir 1.0.0; an in-process runtime on published crates only, with oracle handlers
+  and assertion messages; proving and verification with bb 6.0.0; generic-struct and
+  collision-safe codegen; a `noi-build` that never writes the source tree; full API docs and CI.
+- **Next:** in-process proving (Barretenberg bindings instead of the CLI), recursion helpers,
+  optional `serde` derives, mapping Noir `Option<T>` to Rust `Option<T>`, and source locations for
+  failed assertions.

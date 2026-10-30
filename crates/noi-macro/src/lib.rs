@@ -1,413 +1,646 @@
-//! `noi-macro` implements the `nrg!` procedural macro. Point it at the directory containing
-//! `nargo export` JSON artifacts and it will emit strongly typed Rust modules for each Noir
-//! `#[export]` function. The generated modules expose `Args` structs, visibility-aware `Inputs`
-//! wrappers, a shared `Client`, and helper functions like `simulate`/`prove`/`verify` (the proving
-//! APIs become functional once the runtime hooks land in `noi-core`).
+//! Procedural macro behind [`noi::nrg!`](https://docs.rs/noi/latest/noi/macro.nrg.html).
 //!
-//! ```no_run
-//! use noi::nrg;
-//!
-//! nrg!(module = trading);
-//!
-//! fn main() -> anyhow::Result<()> {
-//!     let client = trading::Client::new("./noir");
-//!     let _ = trading::match_orders::simulate(
-//!         &client,
-//!         trading::match_orders::Args {
-//!             bid: trading::Order { price: 1_005, size: 50 },
-//!             ask: trading::Order { price: 1_000, size: 40 },
-//!             min_size: 25,
-//!         },
-//!     )?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! Set `NOI_DEBUG=1` to dump the generated Rust into `target/noi/expanded.rs` when you want to review
-//! or debug the emitted code.
-use std::{env, fs, path::PathBuf};
+//! Depend on the `noi` crate rather than this one: the generated code refers to items through
+//! `::noi`, so `noi` must be a dependency of the crate invoking the macro. The full guide,
+//! including the shape of the generated code, is in the [`noi` crate docs](https://docs.rs/noi).
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::PathBuf,
+};
 
 use heck::{ToSnakeCase, ToUpperCamelCase};
-use indexmap::IndexMap;
-use noi_core::{
-    export::{ExportFunction, Param, StructType, TypeRepr},
-    load_export_dir,
-};
+use noi_core::export::{collect_structs, ExportFunction, StructType, TypeRepr};
 use proc_macro::TokenStream;
-use proc_macro_error::proc_macro_error;
+use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
     Ident, LitStr, Token,
 };
 
-/// Generates strongly typed Rust bindings for Noir `#[export]` functions.
+/// Generates typed Rust bindings for the Noir `#[export]` functions in an export directory.
 ///
-/// The macro consumes `nargo export` artifacts (either via `export_dir = "..."` or the
-/// `NOI_EXPORT_DIR` environment variable) and emits per-function modules that expose
-/// typed `Args`, `Inputs`, and stubbed execution helpers.
+/// See the [`noi` crate documentation](https://docs.rs/noi) for a walkthrough of the generated
+/// API.
+///
+/// # Arguments
+///
+/// - `module = <ident>` *(required)*: name of the generated Rust module.
+/// - `export_dir = "<path>"` *(optional)*: directory holding the `nargo export` JSON artifacts.
+///   Relative paths are resolved against the invoking crate's `CARGO_MANIFEST_DIR`. When omitted,
+///   the macro reads the `NOI_EXPORT_DIR` environment variable that `noi_build` sets from
+///   `build.rs`.
+///
+/// ```ignore
+/// noi::nrg!(module = demo);                               // uses NOI_EXPORT_DIR
+/// noi::nrg!(module = demo, export_dir = "noir/export");   // explicit directory
+/// ```
+///
+/// Changing an artifact that already exists rebuilds the bindings (each one is embedded with
+/// `include_str!`). Adding a *new* artifact to an explicit `export_dir` is not noticed by cargo;
+/// use `noi-build`, or touch the invoking file.
+///
+/// Set `NOI_DEBUG=1` to write the expanded code to
+/// `$CARGO_TARGET_DIR/noi/<crate>/<module>.rs` (default `target/noi/…`).
 #[proc_macro]
-#[proc_macro_error]
 pub fn nrg(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as MacroInput);
-    match expand(input) {
+    match expand(&input) {
         Ok(tokens) => {
-            maybe_dump(&tokens);
+            maybe_dump(&input.module, &tokens);
             tokens.into()
         }
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand(input: MacroInput) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let export_dir = resolve_export_dir(input.export_dir)?;
+fn expand(input: &MacroInput) -> syn::Result<Tokens> {
+    let span = input.module.span();
+    let error = |msg: String| syn::Error::new(span, format!("nrg!: {msg}"));
+
+    let (export_dir, from_env) = resolve_export_dir(input)?;
+    // Proc-macro env reads are not tracked by cargo; `option_env!` in the output is, so a changed
+    // NOI_EXPORT_DIR (or NOI_DEBUG) rebuilds the bindings.
+    let track_export_dir = if from_env {
+        quote!(
+            const _: ::core::option::Option<&str> = ::core::option_env!("NOI_EXPORT_DIR");
+        )
+    } else {
+        Tokens::new()
+    };
     let functions =
-        load_export_dir(&export_dir).map_err(|err| syn::Error::new(input.module.span(), err))?;
+        noi_core::load_export_dir(&export_dir).map_err(|err| error(format!("{err:#}")))?;
+    let structs = collect_structs(&functions);
+    let names = StructNames::new(&structs);
+    let gen = Generator {
+        names: &names,
+        span,
+    };
 
-    let mut registry = TypeRegistry::new(&input.module);
-    let mut function_modules = Vec::new();
-
+    let mut module_idents = BTreeMap::new();
     for function in &functions {
-        function_modules.push(generate_function_module(function, &mut registry)?);
+        let ident = rust_ident(&function.name.to_snake_case());
+        if let Some(other) = module_idents.insert(ident.to_string(), &function.name) {
+            return Err(error(format!(
+                "exports `{other}` and `{}` both map to the Rust module `{ident}`; rename one",
+                function.name
+            )));
+        }
     }
 
-    let struct_defs = registry.struct_defs();
-    let module_ident = &input.module;
-    let client = generate_client();
+    // Structs and function modules share Rust's type namespace.
+    for (st, ident) in &names.0 {
+        if let Some(function) = module_idents.get(&ident.to_string()) {
+            return Err(error(format!(
+                "struct `{}` and export `{function}` both map to the Rust name `{ident}`; rename one",
+                st.path
+            )));
+        }
+    }
 
-    let tokens = quote! {
-        pub mod #module_ident {
-            use ::std::path::{Path, PathBuf};
+    let struct_defs = structs
+        .iter()
+        .map(|st| gen.struct_def(st))
+        .collect::<syn::Result<Vec<_>>>()?;
+    let function_modules = functions
+        .iter()
+        .map(|f| gen.function_module(f))
+        .collect::<syn::Result<Vec<_>>>()?;
 
+    let module = &input.module;
+    let module_doc = format!(
+        "Bindings for the Noir exports in `{}` (generated by `noi::nrg!`).",
+        export_dir.display()
+    );
+    let client = runner_only(quote! {
+        /// Execution settings shared by every function in this module.
+        pub use ::noi::Client;
+    });
+
+    Ok(quote! {
+        #[doc = #module_doc]
+        #[allow(
+            clippy::all,
+            clippy::pedantic,
+            clippy::nursery,
+            unused_imports,
+            non_camel_case_types
+        )]
+        pub mod #module {
+            // Makes cargo rebuild this crate when `NOI_DEBUG` changes, so the dump is written.
+            const _: ::core::option::Option<&str> = ::core::option_env!("NOI_DEBUG");
+            #track_export_dir
             #client
-
             #(#struct_defs)*
-
             #(#function_modules)*
         }
-    };
-
-    Ok(tokens)
+    })
 }
 
-fn generate_client() -> proc_macro2::TokenStream {
-    quote! {
-        #[derive(Clone, Debug)]
-        pub struct Client {
-            program_dir: PathBuf,
-        }
+struct Generator<'a> {
+    names: &'a StructNames,
+    span: Span,
+}
 
-        impl Client {
-            pub fn new<P: Into<PathBuf>>(program_dir: P) -> Self {
-                Self { program_dir: program_dir.into() }
-            }
-
-            pub fn program_dir(&self) -> &Path {
-                &self.program_dir
-            }
-        }
+impl Generator<'_> {
+    fn error(&self, msg: String) -> syn::Error {
+        syn::Error::new(self.span, format!("nrg!: {msg}"))
     }
-}
 
-fn generate_function_module(
-    function: &ExportFunction,
-    registry: &mut TypeRegistry,
-) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let module_ident = format_ident!("{}", sanitize_snake(&function.name));
-    let doc = format!("Noir signature: {}", function.signature());
-
-    let params = build_param_specs(function, registry);
-
-    let args_struct = build_args_struct(&params, &doc);
-    let (public_struct, private_struct) = build_visibility_structs(&params);
-    let inputs_struct = build_inputs_struct();
-    let converters = build_converters(&params);
-    let output_ty = match &function.return_type {
-        Some(ty) => registry.ty_tokens(ty, TypeUsage::Reference),
-        None => quote!(()),
-    };
-
-    let artifact_path = canonical_path(&function.source_path);
-    let artifact_lit = LitStr::new(&artifact_path, proc_macro2::Span::call_site());
-    let fn_name_lit = LitStr::new(&function.name, proc_macro2::Span::call_site());
-    let insert_inputs: Vec<_> = params
-        .iter()
-        .map(|param| {
-            let ident = &param.ident;
-            let name = &param.name;
-            let source = match param.visibility {
-                VisibilityClass::Public => quote!(inputs.public.#ident),
-                VisibilityClass::Private => quote!(inputs.private.#ident),
-            };
-            quote! {
-                input_map.insert(
-                    #name.to_string(),
-                    ::noi_core::runtime::ToInputValue::to_input_value(&#source),
-                );
+    /// Rust type for a Noir type. `prefix` is prepended to struct names (`super::` inside function
+    /// modules, empty at module level).
+    fn ty(&self, repr: &TypeRepr, prefix: &Tokens) -> syn::Result<Tokens> {
+        Ok(match repr {
+            TypeRepr::Bool | TypeRepr::Unsigned(1) => quote!(bool),
+            TypeRepr::Field => quote!(::noi::FieldElement),
+            TypeRepr::Unsigned(bits @ (8 | 16 | 32 | 64 | 128)) => {
+                let ident = format_ident!("u{bits}");
+                quote!(#ident)
             }
+            TypeRepr::Signed(bits @ (8 | 16 | 32 | 64 | 128)) => {
+                let ident = format_ident!("i{bits}");
+                quote!(#ident)
+            }
+            TypeRepr::Unsigned(_) | TypeRepr::Signed(_) => {
+                return Err(self.error(format!("Noir integer type `{repr}` has no Rust equivalent")))
+            }
+            TypeRepr::String(_) => quote!(::std::string::String),
+            TypeRepr::Array(inner, len) => {
+                let inner = self.ty(inner, prefix)?;
+                let len = proc_macro2::Literal::usize_unsuffixed(*len);
+                quote!([#inner; #len])
+            }
+            TypeRepr::Tuple(items) if items.len() > 12 => {
+                return Err(self.error(format!(
+                    "tuples with more than 12 elements are not supported (found `{repr}`); \
+                     use a struct instead"
+                )))
+            }
+            TypeRepr::Tuple(items) => {
+                let items = items
+                    .iter()
+                    .map(|item| self.ty(item, prefix))
+                    .collect::<syn::Result<Vec<_>>>()?;
+                quote!((#(#items,)*))
+            }
+            TypeRepr::Struct(st) => {
+                let ident = self.names.get(st);
+                quote!(#prefix #ident)
+            }
+            other => return Err(self.error(format!("unsupported Noir type `{other}`"))),
         })
-        .collect();
+    }
 
-    let simulate_body = if function.return_type.is_some() {
-        quote! {
-            let inputs: Inputs = inputs.into();
-            let mut input_map = ::std::collections::BTreeMap::new();
-            #(#insert_inputs)*
-            let result = ::noi_core::runtime::run_function(
-                client.program_dir(),
-                #fn_name_lit,
-                input_map,
-            )?;
-            let value = result.ok_or_else(|| {
-                ::anyhow::anyhow!("function `{}` did not return a value", #fn_name_lit)
+    fn struct_def(&self, st: &StructType) -> syn::Result<Tokens> {
+        let ident = self.names.get(st);
+        let ident_str = ident.to_string();
+        let doc = format!("Rust mirror of the Noir struct `{st}`.");
+        let field_idents =
+            unique_idents(st.fields.iter().map(|f| f.name.as_str())).map_err(|(a, b, id)| {
+                self.error(format!(
+                    "fields `{a}` and `{b}` of struct `{}` both map to the Rust field `{id}`",
+                    st.path
+                ))
             })?;
-            ::noi_core::runtime::FromOutputValue::from_output_value(value)
+
+        let mut fields = Vec::new();
+        let mut to_entries = Vec::new();
+        let mut from_entries = Vec::new();
+        let mut inits = Vec::new();
+        for (i, (field, field_ident)) in st.fields.iter().zip(&field_idents).enumerate() {
+            let ty = self.ty(&field.ty, &Tokens::new())?;
+            let name = &field.name;
+            let field_doc = format!("Noir: `{name}: {}`", field.ty);
+            // Generated locals are prefixed so no Noir field name can shadow them.
+            let tmp = format_ident!("__noi_f{i}");
+            fields.push(quote!(#[doc = #field_doc] pub #field_ident: #ty,));
+            to_entries.push(quote! {
+                (#name.to_owned(), __rt::ToValue::to_value(&self.#field_ident))
+            });
+            from_entries.push(quote! {
+                let #tmp = __rt::FromValue::from_value(
+                    __noi_fields.remove(#name).ok_or_else(|| ::noi::__private::anyhow::anyhow!(
+                        "struct `{}` is missing field `{}`", #ident_str, #name
+                    ))?,
+                ).map_err(|e| e.context(::std::format!("in field `{}`", #name)))?;
+            });
+            inits.push(quote!(#field_ident: #tmp));
         }
-    } else {
-        quote! {
-            let inputs: Inputs = inputs.into();
-            let mut input_map = ::std::collections::BTreeMap::new();
-            #(#insert_inputs)*
-            ::noi_core::runtime::run_function(client.program_dir(), #fn_name_lit, input_map)?;
-            Ok(())
-        }
-    };
 
-    let simulate_fn = quote! {
-        pub fn simulate(client: &super::Client, inputs: impl ::core::convert::Into<Inputs>) -> ::anyhow::Result<Output> {
-            #simulate_body
-        }
-    };
+        let derives = derives(st.fields.iter().all(|f| supports_default(&f.ty)));
+        let conversions = runner_only(quote! {
+            const _: () = {
+                use ::noi::__private::runtime as __rt;
+                impl __rt::ToValue for #ident {
+                    fn to_value(&self) -> __rt::Value {
+                        __rt::Value::Struct(::std::collections::BTreeMap::from([
+                            #(#to_entries),*
+                        ]))
+                    }
+                }
+                impl __rt::FromValue for #ident {
+                    fn from_value(__noi_value: __rt::Value) -> ::noi::Result<Self> {
+                        let __rt::Value::Struct(mut __noi_fields) = __noi_value else {
+                            return ::core::result::Result::Err(::noi::__private::anyhow::anyhow!(
+                                "expected struct `{}`, got {:?}", #ident_str, __noi_value
+                            ));
+                        };
+                        #(#from_entries)*
+                        ::core::result::Result::Ok(Self { #(#inits),* })
+                    }
+                }
+            };
+        });
 
-    let module = quote! {
-        #[doc = #doc]
-        pub mod #module_ident {
-            use super::Client;
-
-            pub const ARTIFACT_JSON: &str = include_str!(#artifact_lit);
-
-            #args_struct
-            #public_struct
-            #private_struct
-            #inputs_struct
-            #converters
-
+        Ok(quote! {
             #[doc = #doc]
-            pub type Output = #output_ty;
+            #derives
+            pub struct #ident {
+                #(#fields)*
+            }
+            #conversions
+        })
+    }
 
-            #simulate_fn
+    fn function_module(&self, function: &ExportFunction) -> syn::Result<Tokens> {
+        let module = rust_ident(&function.name.to_snake_case());
+        let name = &function.name;
+        let signature = function.signature();
+        let super_prefix = quote!(super::);
+
+        let idents = unique_idents(function.parameters.iter().map(|p| p.name.as_str())).map_err(
+            |(a, b, id)| {
+                self.error(format!(
+                    "parameters `{a}` and `{b}` of `{name}` both map to the Rust field `{id}`"
+                ))
+            },
+        )?;
+        let mut fields = Vec::new();
+        let mut inserts = Vec::new();
+        for (param, ident) in function.parameters.iter().zip(&idents) {
+            let ty = self.ty(&param.ty, &super_prefix)?;
+            let doc = format!("Noir: `{}: {}`", param.name, param.ty);
+            let noir_name = &param.name;
+            fields.push(quote!(#[doc = #doc] pub #ident: #ty,));
+            inserts.push(quote! {
+                (#noir_name.to_owned(), __rt::ToValue::to_value(&__noi_args.#ident))
+            });
         }
-    };
+        let args_derives = derives(function.parameters.iter().all(|p| supports_default(&p.ty)));
 
-    Ok(module)
-}
-
-fn build_param_specs(function: &ExportFunction, registry: &mut TypeRegistry) -> Vec<ParamSpec> {
-    function
-        .parameters
-        .iter()
-        .map(|param| ParamSpec::new(param, registry))
-        .collect()
-}
-
-struct ParamSpec {
-    ident: Ident,
-    name: LitStr,
-    ty: proc_macro2::TokenStream,
-    visibility: VisibilityClass,
-}
-
-impl ParamSpec {
-    fn new(param: &Param, registry: &mut TypeRegistry) -> Self {
-        let ident = format_ident!("{}", sanitize_snake(&param.name));
-        let name = LitStr::new(&param.name, proc_macro2::Span::call_site());
-        let ty = registry.ty_tokens(&param.ty, TypeUsage::Reference);
-        let visibility = match param.visibility {
-            noi_core::export::Visibility::Public => VisibilityClass::Public,
-            noi_core::export::Visibility::Private => VisibilityClass::Private,
+        let output_ty = match &function.return_type {
+            Some(ty) => self.ty(ty, &super_prefix)?,
+            None => quote!(()),
         };
-        Self {
-            ident,
-            name,
-            ty,
-            visibility,
-        }
-    }
-}
+        let output_doc = match &function.return_type {
+            Some(ty) => format!(
+                "Return type of `{name}` (Noir: `{ty}`). With the `prove` feature this is also \
+                 the public statement a proof attests to."
+            ),
+            None => format!("`{name}` returns nothing."),
+        };
 
-enum VisibilityClass {
-    Public,
-    Private,
-}
+        let artifact = fs::canonicalize(&function.source_path)
+            .unwrap_or_else(|_| function.source_path.clone());
+        let artifact = LitStr::new(&artifact.to_string_lossy(), Span::call_site());
 
-fn build_args_struct(params: &[ParamSpec], doc: &str) -> proc_macro2::TokenStream {
-    let fields = params.iter().map(|param| {
-        let ident = &param.ident;
-        let ty = &param.ty;
-        quote!(pub #ident: #ty,)
-    });
-    quote! {
-        #[doc = #doc]
-        #[derive(Clone, Debug, PartialEq)]
-        pub struct Args {
-            #(#fields)*
-        }
-    }
-}
-
-fn build_visibility_structs(
-    params: &[ParamSpec],
-) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
-    let mut public = Vec::new();
-    let mut private = Vec::new();
-    for param in params {
-        match param.visibility {
-            VisibilityClass::Public => public.push(param),
-            VisibilityClass::Private => private.push(param),
-        }
-    }
-
-    (
-        visibility_struct_tokens("PublicInputs", &public),
-        visibility_struct_tokens("PrivateInputs", &private),
-    )
-}
-
-fn visibility_struct_tokens(name: &str, fields: &[&ParamSpec]) -> proc_macro2::TokenStream {
-    let ident = format_ident!("{name}");
-    let field_tokens = fields.iter().map(|param| {
-        let ident = &param.ident;
-        let ty = &param.ty;
-        quote!(pub #ident: #ty,)
-    });
-
-    quote! {
-        #[derive(Clone, Debug, Default, PartialEq)]
-        pub struct #ident {
-            #(#field_tokens)*
-        }
-    }
-}
-
-fn build_inputs_struct() -> proc_macro2::TokenStream {
-    quote! {
-        #[derive(Clone, Debug, Default, PartialEq)]
-        pub struct Inputs {
-            pub public: PublicInputs,
-            pub private: PrivateInputs,
-        }
-    }
-}
-
-fn build_converters(params: &[ParamSpec]) -> proc_macro2::TokenStream {
-    let public_init: Vec<_> = params
-        .iter()
-        .filter(|param| matches!(param.visibility, VisibilityClass::Public))
-        .map(|param| {
-            let ident = &param.ident;
-            quote!(#ident: args.#ident,)
-        })
-        .collect();
-    let private_init: Vec<_> = params
-        .iter()
-        .filter(|param| matches!(param.visibility, VisibilityClass::Private))
-        .map(|param| {
-            let ident = &param.ident;
-            quote!(#ident: args.#ident,)
-        })
-        .collect();
-
-    let args_from_inputs_fields = params.iter().map(|param| {
-        let ident = &param.ident;
-        match param.visibility {
-            VisibilityClass::Public => quote!(#ident: inputs.public.#ident),
-            VisibilityClass::Private => quote!(#ident: inputs.private.#ident),
-        }
-    });
-
-    quote! {
-        impl From<Args> for Inputs {
-            fn from(args: Args) -> Self {
-                Self {
-                    public: PublicInputs {
-                        #(#public_init)*
-                    },
-                    private: PrivateInputs {
-                        #(#private_init)*
-                    },
-                }
+        let decode_output = if function.return_type.is_some() {
+            quote! {
+                let __noi_value = __noi_execution.into_return_value().ok_or_else(|| {
+                    ::noi::__private::anyhow::anyhow!("`{}` did not return a value", NAME)
+                })?;
+                __rt::FromValue::from_value(__noi_value)
+                    .map_err(|e| e.context(::std::format!("decoding the output of `{}`", NAME)))
             }
-        }
-
-        impl From<Inputs> for Args {
-            fn from(inputs: Inputs) -> Self {
-                Self {
-                    #(#args_from_inputs_fields,)*
-                }
-            }
-        }
-    }
-}
-
-fn sanitize_snake(name: &str) -> String {
-    sanitize(name).to_snake_case()
-}
-
-fn sanitize_pascal(name: &str) -> String {
-    sanitize(name).to_upper_camel_case()
-}
-
-fn sanitize(name: &str) -> String {
-    let mut out = String::new();
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
         } else {
-            out.push('_');
+            quote!(::core::result::Result::Ok(()))
+        };
+
+        let execution_fns = runner_only(quote! {
+            use ::noi::__private::runtime as __rt;
+
+            /// The decoded artifact, parsed on first use and cached for the life of the process.
+            ///
+            /// # Errors
+            ///
+            /// Fails if the embedded artifact was produced by an incompatible Noir release.
+            pub fn program() -> ::noi::Result<&'static ::noi::Program> {
+                static PROGRAM: ::std::sync::OnceLock<
+                    ::core::result::Result<::noi::Program, ::std::string::String>,
+                > = ::std::sync::OnceLock::new();
+                PROGRAM
+                    .get_or_init(|| {
+                        ::noi::Program::from_json(NAME, ARTIFACT_JSON)
+                            .map_err(|e| ::std::format!("{e:#}"))
+                    })
+                    .as_ref()
+                    .map_err(|e| ::noi::__private::anyhow::anyhow!("{e}"))
+            }
+
+            /// Runs the function and returns the raw [`Execution`](::noi::Execution), including
+            /// the solved witness. Use [`simulate`] unless you need the witness.
+            ///
+            /// # Errors
+            ///
+            /// Fails on invalid inputs, a failing Noir assertion, or a failing oracle (see
+            /// [`ExecutionError`](::noi::ExecutionError)).
+            pub fn execute(client: &::noi::Client, args: &Args) -> ::noi::Result<::noi::Execution> {
+                let __noi_args = args;
+                let __noi_inputs: __rt::InputMap =
+                    ::std::collections::BTreeMap::from([#(#inserts),*]);
+                program()?.execute(client, &__noi_inputs)
+            }
+
+            /// Executes the function and returns its typed output.
+            ///
+            /// No proof is produced; this only solves the circuit, so it is fast enough for tests
+            /// and request handlers.
+            ///
+            /// # Errors
+            ///
+            /// Fails on invalid inputs, a failing Noir assertion, or a failing oracle (see
+            /// [`ExecutionError`](::noi::ExecutionError)).
+            pub fn simulate(client: &::noi::Client, args: &Args) -> ::noi::Result<Output> {
+                let __noi_execution = execute(client, args)?;
+                #decode_output
+            }
+        });
+
+        let decode_public = if function.return_type.is_some() {
+            quote! {
+                let __noi_value = proof.return_value(program()?)?.ok_or_else(|| {
+                    ::noi::__private::anyhow::anyhow!("proof for `{}` has no public output", NAME)
+                })?;
+                __rt::FromValue::from_value(__noi_value)
+            }
+        } else {
+            quote!(::core::result::Result::Ok(()))
+        };
+        let prove_fns = prove_only(quote! {
+                /// Executes the function and proves the execution with Barretenberg, using the
+                /// prover configured on `client` (see [`Client::with_prover`](::noi::Client::with_prover)).
+                ///
+                /// The proof's public inputs are the function's return value ([`Output`]): Noir
+                /// does not allow `pub` parameters on `#[export]` functions, so return any input
+                /// the proof should commit to.
+                ///
+                /// # Errors
+                ///
+                /// Fails on invalid inputs, failing assertions, or if `bb` is unavailable or fails.
+                pub fn prove(client: &::noi::Client, args: &Args) -> ::noi::Result<::noi::Proof> {
+                    let __noi_execution = execute(client, args)?;
+                    client.prover().prove(program()?, &__noi_execution)
+                }
+
+                /// Checks `proof` against this function's verification key. `Ok(false)` means the
+                /// proof is invalid.
+                ///
+                /// This only says *some* valid execution exists; use [`verified_output`] to also
+                /// learn what it proves.
+                ///
+                /// # Errors
+                ///
+                /// Fails if verification could not run (see [`Prover::verify`](::noi::Prover::verify)).
+                pub fn verify(client: &::noi::Client, proof: &::noi::Proof) -> ::noi::Result<bool> {
+                    client.prover().verify(program()?, proof)
+                }
+
+                /// Verifies `proof` and returns the statement it proves, decoded as [`Output`].
+                ///
+                /// # Errors
+                ///
+                /// Fails if the proof is invalid, or as [`verify`] does.
+                pub fn verified_output(
+                    client: &::noi::Client,
+                    proof: &::noi::Proof,
+                ) -> ::noi::Result<Output> {
+                    if !verify(client, proof)? {
+                        return ::core::result::Result::Err(::noi::__private::anyhow::anyhow!(
+                            "proof for `{}` is invalid", NAME
+                        ));
+                    }
+                    #decode_public
+                }
+
+                /// The verification key (computed once, then cached). Share it with verifiers.
+                ///
+                /// # Errors
+                ///
+                /// Fails if `bb` is unavailable or fails.
+                pub fn verification_key(client: &::noi::Client) -> ::noi::Result<::std::vec::Vec<u8>> {
+                    client.prover().verification_key(program()?)
+                }
+
+                /// A Solidity verifier contract for this function. Requires a prover configured
+                /// with [`VerifierTarget::Evm`](::noi::VerifierTarget::Evm) or `EvmNoZk`.
+                ///
+                /// # Errors
+                ///
+                /// Fails for non-EVM targets or if `bb` fails.
+                pub fn solidity_verifier(
+                    client: &::noi::Client,
+                ) -> ::noi::Result<::std::string::String> {
+                    client.prover().solidity_verifier(program()?)
+            }
+        });
+
+        let module_doc = format!("Bindings for `{signature}`.");
+        Ok(quote! {
+            #[doc = #module_doc]
+            pub mod #module {
+                /// Noir function name.
+                pub const NAME: &str = #name;
+                /// Noir signature, e.g. `fn add(a: u32, b: u32) -> u32`.
+                pub const SIGNATURE: &str = #signature;
+                /// The `nargo export` artifact (bytecode + ABI) embedded at compile time.
+                pub const ARTIFACT_JSON: &str = ::core::include_str!(#artifact);
+
+                /// The function's parameters, in Noir declaration order.
+                #args_derives
+                pub struct Args {
+                    #(#fields)*
+                }
+
+                #[doc = #output_doc]
+                pub type Output = #output_ty;
+
+                #execution_fns
+                #prove_fns
+            }
+        })
+    }
+}
+
+/// Items that need `noi`'s `runner` feature. The check happens in the *target* `noi` crate (the
+/// proc macro's own features are those of the host build and may differ).
+fn runner_only(tokens: Tokens) -> Tokens {
+    quote!(::noi::__private::if_runner! { #tokens })
+}
+
+/// Items that need `noi`'s `prove` feature (see [`runner_only`]).
+fn prove_only(tokens: Tokens) -> Tokens {
+    quote!(::noi::__private::if_prove! { #tokens })
+}
+
+fn derives(default: bool) -> Tokens {
+    if default {
+        quote!(#[derive(Clone, Debug, PartialEq, Default)])
+    } else {
+        quote!(#[derive(Clone, Debug, PartialEq)])
+    }
+}
+
+/// `Default` is only implemented by the standard library for arrays up to length 32.
+fn supports_default(ty: &TypeRepr) -> bool {
+    match ty {
+        TypeRepr::Array(inner, len) => *len <= 32 && supports_default(inner),
+        TypeRepr::Tuple(items) => items.iter().all(supports_default),
+        TypeRepr::Struct(st) => st.fields.iter().all(|f| supports_default(&f.ty)),
+        _ => true,
+    }
+}
+
+/// Maps Noir names to `snake_case` Rust identifiers, rejecting two names that collide.
+fn unique_idents<'a>(
+    names: impl Iterator<Item = &'a str>,
+) -> Result<Vec<Ident>, (&'a str, &'a str, Ident)> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    let mut out = Vec::new();
+    for name in names {
+        let ident = rust_ident(&name.to_snake_case());
+        if let Some(prev) = seen.insert(ident.to_string(), name) {
+            return Err((prev, name, ident));
         }
+        out.push(ident);
     }
-    if out.is_empty() {
-        out.push('x');
-    }
-    if out.chars().next().unwrap().is_ascii_digit() {
-        out.insert(0, '_');
-    }
-    out
+    Ok(out)
 }
 
-fn canonical_path(path: &PathBuf) -> String {
-    fs::canonicalize(path)
-        .unwrap_or_else(|_| path.clone())
-        .to_string_lossy()
-        .into_owned()
+/// Builds an identifier, escaping Rust keywords (`move` → `r#move`, `self` → `self_`).
+fn rust_ident(name: &str) -> Ident {
+    let mut cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned.starts_with(|c: char| c.is_ascii_digit()) {
+        cleaned.insert(0, '_');
+    }
+    if matches!(cleaned.as_str(), "self" | "Self" | "super" | "crate" | "_") {
+        return format_ident!("{cleaned}_");
+    }
+    match syn::parse_str::<Ident>(&cleaned) {
+        Ok(ident) => ident,
+        Err(_) => Ident::new_raw(&cleaned, Span::call_site()),
+    }
 }
 
-fn resolve_export_dir(explicit: Option<LitStr>) -> Result<PathBuf, syn::Error> {
-    if let Some(lit) = explicit {
-        return Ok(PathBuf::from(lit.value()));
+/// Names that a generated struct must not take: the module's own `Client`, and prelude types that
+/// a `use module::*` would otherwise shadow.
+const RESERVED: &[&str] = &[
+    "Client", "Option", "Result", "String", "Vec", "Box", "Some", "None", "Ok", "Err",
+];
+
+/// Assigns every struct instantiation a unique Rust name, deterministically:
+///
+/// 1. the short name (`P` for `demo::P`), or the full path in UpperCamelCase (`OrdersOrder`) when
+///    structs from different paths share a short name;
+/// 2. reserved names get a `Noir` prefix (`std::option::Option` → `NoirOption`);
+/// 3. remaining clashes (generic instantiations of one struct) get a numeric suffix in
+///    [`collect_structs`] order (`NoirOption`, `NoirOption2`).
+struct StructNames(Vec<(StructType, Ident)>);
+
+impl StructNames {
+    fn new(structs: &[&StructType]) -> Self {
+        let short = |st: &StructType| st.short_name().to_upper_camel_case();
+        let mut paths_by_short: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        for st in structs {
+            paths_by_short
+                .entry(short(st))
+                .or_default()
+                .insert(&st.path);
+        }
+        let mut taken = BTreeSet::new();
+        let names = structs
+            .iter()
+            .map(|st| {
+                let mut base = short(st);
+                if paths_by_short[&base].len() > 1 {
+                    base = st.path.replace("::", "_").to_upper_camel_case();
+                }
+                if base.is_empty() {
+                    base = "Struct".into();
+                }
+                if RESERVED.contains(&base.as_str()) {
+                    base = format!("Noir{base}");
+                }
+                let mut name = base.clone();
+                let mut n = 2;
+                while RESERVED.contains(&name.as_str()) || !taken.insert(name.clone()) {
+                    name = format!("{base}{n}");
+                    n += 1;
+                }
+                ((*st).clone(), rust_ident(&name))
+            })
+            .collect();
+        Self(names)
     }
 
-    match env::var("NOI_EXPORT_DIR") {
-        Ok(value) => Ok(PathBuf::from(value)),
-        Err(_) => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`NOI_EXPORT_DIR` is not set and `export_dir` was not provided",
-        )),
+    fn get(&self, st: &StructType) -> &Ident {
+        // Every struct reachable from an export was registered from `collect_structs`.
+        &self
+            .0
+            .iter()
+            .find(|(s, _)| s == st)
+            .expect("struct registered by collect_structs")
+            .1
     }
 }
 
-fn maybe_dump(tokens: &proc_macro2::TokenStream) {
+/// The export directory, and whether it came from `NOI_EXPORT_DIR`.
+fn resolve_export_dir(input: &MacroInput) -> syn::Result<(PathBuf, bool)> {
+    if let Some(lit) = &input.export_dir {
+        let path = PathBuf::from(lit.value());
+        if path.is_relative() {
+            if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
+                return Ok((PathBuf::from(manifest_dir).join(path), false));
+            }
+        }
+        return Ok((path, false));
+    }
+    env::var("NOI_EXPORT_DIR")
+        .map(|dir| (PathBuf::from(dir), true))
+        .map_err(|_| {
+            syn::Error::new(
+                input.module.span(),
+                "nrg!: no export directory. Either call `noi_build` from build.rs (it sets \
+             `NOI_EXPORT_DIR`), or pass `export_dir = \"path/to/noir/export\"`",
+            )
+        })
+}
+
+fn maybe_dump(module: &Ident, tokens: &Tokens) {
     if env::var("NOI_DEBUG").as_deref() != Ok("1") {
         return;
     }
-    let target_dir = env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("target"));
-    let dump_path = target_dir.join("noi").join("expanded.rs");
-    if let Some(parent) = dump_path.parent() {
+    let target_dir = env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into());
+    let krate = env::var("CARGO_CRATE_NAME").unwrap_or_else(|_| "unknown".into());
+    let path = PathBuf::from(target_dir)
+        .join("noi")
+        .join(krate)
+        .join(format!("{module}.rs"));
+    // Best effort: a debugging aid must never break the build.
+    if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(dump_path, tokens.to_string());
+    let _ = fs::write(path, tokens.to_string());
 }
 
 struct MacroInput {
@@ -424,210 +657,138 @@ impl Parse for MacroInput {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
             match key.to_string().as_str() {
-                "module" => {
-                    module = Some(input.parse()?);
-                }
-                "export_dir" => {
-                    export_dir = Some(input.parse()?);
-                }
+                "module" => module = Some(input.parse()?),
+                "export_dir" => export_dir = Some(input.parse()?),
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown argument `{other}`"),
+                        format!(
+                            "nrg!: unknown argument `{other}`; expected `module` or `export_dir`"
+                        ),
                     ))
                 }
             }
-            if input.is_empty() {
-                break;
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
             }
-            let _ = input.parse::<Token![,]>();
         }
 
         let module = module.ok_or_else(|| {
             syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "`module = <ident>` is required",
+                Span::call_site(),
+                "nrg!: missing `module = <name>`, e.g. `nrg!(module = demo)`",
             )
         })?;
-
         Ok(Self { module, export_dir })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct StructShape(Vec<(String, TypeRepr)>);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl StructShape {
-    fn from_struct(struct_ty: &StructType) -> Self {
-        let fields = struct_ty
-            .fields
+    fn st(path: &str, field_ty: TypeRepr) -> StructType {
+        serde_like_struct(path, vec![("v", field_ty)])
+    }
+
+    fn serde_like_struct(path: &str, fields: Vec<(&str, TypeRepr)>) -> StructType {
+        // `StructType` is `#[non_exhaustive]`; build it through the public loader instead.
+        let fields_json: Vec<String> = fields
             .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
+            .map(|(name, ty)| format!(r#"{{"name":"{name}","type":{}}}"#, ty_json(ty)))
             .collect();
-        Self(fields)
-    }
-}
-
-struct TypeRegistry {
-    structs: IndexMap<StructShape, Ident>,
-    defs: Vec<proc_macro2::TokenStream>,
-    module_name: String,
-    counter: usize,
-}
-
-#[derive(Clone, Copy)]
-enum TypeUsage {
-    Definition,
-    Reference,
-}
-
-impl TypeRegistry {
-    fn new(module: &Ident) -> Self {
-        Self {
-            structs: IndexMap::new(),
-            defs: Vec::new(),
-            module_name: module.to_string(),
-            counter: 0,
+        let json = format!(
+            r#"{{"abi":{{"parameters":[{{"name":"x","type":{{"kind":"struct","path":"{path}","fields":[{}]}}}}]}}}}"#,
+            fields_json.join(",")
+        );
+        let dir = tempdir();
+        fs::write(dir.join("f.json"), json).unwrap();
+        let f = noi_core::load_export_file(dir.join("f.json")).unwrap();
+        match &f.parameters[0].ty {
+            TypeRepr::Struct(st) => st.clone(),
+            _ => unreachable!(),
         }
     }
 
-    fn ty_tokens(&mut self, repr: &TypeRepr, usage: TypeUsage) -> proc_macro2::TokenStream {
-        match repr {
-            TypeRepr::Bool => quote!(bool),
-            TypeRepr::Field => quote!(::noi_core::types::FieldElement),
-            TypeRepr::Unsigned(bits) => {
-                let ident = format_ident!("u{}", bits);
-                quote!(#ident)
+    fn ty_json(ty: &TypeRepr) -> String {
+        match ty {
+            TypeRepr::Bool => r#"{"kind":"boolean"}"#.into(),
+            TypeRepr::Unsigned(w) => {
+                format!(r#"{{"kind":"integer","sign":"unsigned","width":{w}}}"#)
             }
-            TypeRepr::Signed(bits) => {
-                let ident = format_ident!("i{}", bits);
-                quote!(#ident)
-            }
-            TypeRepr::Array(inner, len) => {
-                let inner_tokens = self.ty_tokens(inner, usage);
-                let len_lit = proc_macro2::Literal::usize_unsuffixed(*len);
-                quote!([#inner_tokens; #len_lit])
-            }
-            TypeRepr::Tuple(values) => {
-                let tokens = values
-                    .iter()
-                    .map(|value| self.ty_tokens(value, usage))
-                    .collect::<Vec<_>>();
-                match tokens.len() {
-                    0 => quote!(()),
-                    1 => {
-                        let ty = &tokens[0];
-                        quote!((#ty,))
-                    }
-                    _ => quote!((#(#tokens),*)),
-                }
-            }
-            TypeRepr::Struct(struct_ty) => {
-                let ident = self.ensure_struct(struct_ty);
-                match usage {
-                    TypeUsage::Definition => quote!(#ident),
-                    TypeUsage::Reference => quote!(super::#ident),
-                }
-            }
+            TypeRepr::Tuple(items) => format!(
+                r#"{{"kind":"tuple","fields":[{}]}}"#,
+                items.iter().map(ty_json).collect::<Vec<_>>().join(",")
+            ),
+            _ => unimplemented!(),
         }
     }
 
-    fn ensure_struct(&mut self, struct_ty: &StructType) -> Ident {
-        let shape = StructShape::from_struct(struct_ty);
-        if let Some(existing) = self.structs.get(&shape) {
-            return existing.clone();
-        }
+    fn tempdir() -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "noi-macro-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-        let ident = self.next_struct_ident(struct_ty);
-        self.structs.insert(shape, ident.clone());
+    #[test]
+    fn keywords_and_odd_names_are_escaped() {
+        assert_eq!(rust_ident("move").to_string(), "r#move");
+        assert_eq!(rust_ident("self").to_string(), "self_");
+        assert_eq!(rust_ident("1st").to_string(), "_1st");
+        assert_eq!(rust_ident("a-b").to_string(), "a_b");
+    }
 
-        let mut field_tokens = Vec::new();
-        let mut to_entries = Vec::new();
-        let mut from_entries = Vec::new();
-        let mut assignments = Vec::new();
+    #[test]
+    fn colliding_names_are_reported() {
+        let err = unique_idents(["fooBar", "foo_bar"].into_iter()).unwrap_err();
+        assert_eq!(
+            (err.0, err.1, err.2.to_string()),
+            ("fooBar", "foo_bar", "foo_bar".into())
+        );
+        assert!(unique_idents(["x", "y"].into_iter()).is_ok());
+    }
 
-        for field in &struct_ty.fields {
-            let field_ident = format_ident!("{}", sanitize_snake(&field.name));
-            let ty = self.ty_tokens(&field.ty, TypeUsage::Definition);
-            let field_name = LitStr::new(&field.name, proc_macro2::Span::call_site());
+    #[test]
+    fn struct_names_are_unique_and_avoid_reserved_words() {
+        let a = st("a::Order", TypeRepr::Bool);
+        let b = st("b::Order", TypeRepr::Bool);
+        let opt8 = st("std::option::Option", TypeRepr::Unsigned(8));
+        let opt32 = st("std::option::Option", TypeRepr::Unsigned(32));
+        let client = st("lib::Client", TypeRepr::Bool);
+        // A struct whose own short name equals another's path-based name.
+        let aorder = st("x::AOrder", TypeRepr::Bool);
+        let all = [&a, &b, &opt8, &opt32, &client, &aorder];
+        let names = StructNames::new(&all);
+        let got: Vec<String> = all.iter().map(|s| names.get(s).to_string()).collect();
+        assert_eq!(
+            got,
+            [
+                "AOrder",
+                "BOrder",
+                "NoirOption",
+                "NoirOption2",
+                "NoirClient",
+                "AOrder2"
+            ]
+        );
+    }
 
-            field_tokens.push(quote!(pub #field_ident: #ty,));
-            to_entries.push(quote! {
-                map.insert(
-                    #field_name.to_string(),
-                    ::noi_core::runtime::ToInputValue::to_input_value(&self.#field_ident),
-                );
-            });
-            from_entries.push(quote! {
-                let value = map
-                    .remove(#field_name)
-                    .ok_or_else(|| ::anyhow::anyhow!(
-                        "missing field `{}` in struct `{}`",
-                        #field_name,
-                        stringify!(#ident)
-                    ))?;
-                let #field_ident = ::noi_core::runtime::FromOutputValue::from_output_value(value)?;
-            });
-            assignments.push(field_ident);
-        }
-
-        let def = quote! {
-            #[derive(Clone, Debug, PartialEq, Default)]
-            pub struct #ident {
-                #(#field_tokens)*
-            }
+    #[test]
+    fn wide_tuples_are_rejected_with_a_clear_error() {
+        let names = StructNames::new(&[]);
+        let gen = Generator {
+            names: &names,
+            span: Span::call_site(),
         };
-
-        let to_impl = quote! {
-            impl ::noi_core::runtime::ToInputValue for #ident {
-                fn to_input_value(&self) -> ::noi_core::runtime::InputValue {
-                    let mut map = ::std::collections::BTreeMap::new();
-                    #(#to_entries)*
-                    ::noi_core::runtime::InputValue::Struct(map)
-                }
-            }
-        };
-
-        let from_impl = quote! {
-            impl ::noi_core::runtime::FromOutputValue for #ident {
-                fn from_output_value(value: ::noi_core::runtime::InputValue) -> ::anyhow::Result<Self> {
-                    if let ::noi_core::runtime::InputValue::Struct(mut map) = value {
-                        #(#from_entries)*
-                        Ok(Self { #( #assignments, )* })
-                    } else {
-                        Err(::anyhow::anyhow!("expected struct `{}`", stringify!(#ident)))
-                    }
-                }
-            }
-        };
-
-        self.defs.push(quote! {
-            #def
-            #to_impl
-            #from_impl
-        });
-
-        ident
-    }
-
-    fn next_struct_ident(&mut self, struct_ty: &StructType) -> Ident {
-        let base = struct_ty
-            .name
-            .as_deref()
-            .map(sanitize_pascal)
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| {
-                format!(
-                    "{}Struct{}",
-                    self.module_name.to_upper_camel_case(),
-                    self.counter
-                )
-            });
-        self.counter += 1;
-        format_ident!("{base}")
-    }
-
-    fn struct_defs(&self) -> Vec<proc_macro2::TokenStream> {
-        self.defs.clone()
+        let wide = TypeRepr::Tuple(vec![TypeRepr::Bool; 13]);
+        let err = gen.ty(&wide, &Tokens::new()).unwrap_err().to_string();
+        assert!(err.contains("more than 12 elements"), "{err}");
+        assert!(gen
+            .ty(&TypeRepr::Tuple(vec![TypeRepr::Bool; 12]), &Tokens::new())
+            .is_ok());
     }
 }

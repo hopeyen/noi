@@ -1,17 +1,13 @@
-use std::path::Path;
-
-use anyhow::Result;
 use noi::nrg;
 
 nrg!(module = dark_pool);
 
-fn main() -> Result<()> {
-    let noir_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("noir");
-    let client = dark_pool::Client::new(&noir_dir);
+fn main() -> noi::Result<()> {
+    let client = dark_pool::Client::new();
 
     let matched = dark_pool::match_orders::simulate(
         &client,
-        dark_pool::match_orders::Args {
+        &dark_pool::match_orders::Args {
             bid: dark_pool::Order {
                 price: 1_005,
                 size: 50,
@@ -28,7 +24,7 @@ fn main() -> Result<()> {
 
     let delta = dark_pool::settle_batch::simulate(
         &client,
-        dark_pool::settle_batch::Args {
+        &dark_pool::settle_batch::Args {
             filled: [12, 18, 10],
             reserve: 45,
         },

@@ -3,9 +3,11 @@
 Thanks for helping build the Noir-to-Rust bridge! Please read `AGENTS.md` and `milestone.md` for the current engineering plan and coding conventions.
 
 ## Prerequisites
-- Rust toolchain listed in `rust-toolchain.toml`
-- `nargo` CLI from the Noir toolchain (<https://noir-lang.org/docs>)
-- `cargo fmt`, `cargo clippy`, and `cargo test` must pass before opening a pull request.
+- Rust 1.92 (pinned in `rust-toolchain.toml`; the published crates support 1.89+)
+- `nargo` 1.0.0 to re-export example artifacts (`scripts/refresh_exports.sh` fetches it)
+- `bb` 6.0.0 to run the proving tests (`scripts/install_bb.sh` fetches it)
+- `cargo fmt`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
+  `cargo test --workspace` must pass before opening a pull request.
 
 ## Workflow
 1. Choose the milestone or task you want to tackle and restate it in your PR description.

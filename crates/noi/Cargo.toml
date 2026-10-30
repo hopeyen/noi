@@ -12,17 +12,26 @@ documentation = "https://docs.rs/noi"
 readme = "README.md"
 keywords = ["noir", "zk", "bindings"]
 categories = ["cryptography"]
-build = "build.rs"
+
+[package.metadata.docs.rs]
+# Document the proving API too.
+all-features = true
 
 [features]
 default = ["runner"]
-runner = ["noi-core/runner", "noi-macro/runner"]
-prove = ["noi-core/prove", "noi-macro/prove"]
-field = ["noi-core/field", "noi-macro/field"]
+# Execute exports from Rust (`simulate`/`execute`). Pulls in the Noir execution crates.
+runner = ["noi-core/runner"]
+# Generate `prove`/`verify`/`verification_key`, backed by Barretenberg's `bb` CLI. Implies `runner`.
+prove = ["runner", "noi-core/prove"]
+# Use `acvm::FieldElement` for Noir `Field` values without enabling `runner`.
+field = ["noi-core/field"]
 
 [dependencies]
-noi-core = { version = "0.0.1", default-features = false }
-noi-macro = { version = "0.0.1", default-features = false }
+anyhow.workspace = true
+noi-core = { version = "0.0.2", path = "../noi-core", default-features = false }
+noi-macro = { version = "0.0.2", path = "../noi-macro", default-features = false }
 
 [dev-dependencies]
-anyhow.workspace = true
+# Lets the build.rs snippet in the crate docs compile as a doctest.
+noi-build = { version = "0.0.2", path = "../noi-build" }
+tempfile.workspace = true

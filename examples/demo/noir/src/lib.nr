@@ -34,3 +34,57 @@ fn touch_exports() {
         let _ = move_point(P { x: zero_u32, y: zero_u32 }, 0);
     }
 }
+
+#[export]
+fn checked_div(a: u32, b: u32) -> u32 {
+    assert(b != 0, "division by zero");
+    a / b
+}
+
+#[export]
+fn greet(name: str<5>) -> str<5> {
+    name
+}
+
+/// Proves `secret > threshold` without revealing `secret`.
+///
+/// Noir only allows `pub` on a program's `main`; for `#[export]` functions the ACIR return values
+/// are what a proof makes public. Returning `threshold` therefore commits the proof to it.
+#[export]
+fn above_threshold(threshold: u32, secret: u32) -> (u32, bool) {
+    (threshold, secret > threshold)
+}
+
+/// Compiled as its own ACIR circuit (`#[fold]`), so callers exercise ACIR-to-ACIR calls.
+#[fold]
+fn square(x: Field) -> Field {
+    x * x
+}
+
+#[export]
+fn sum_of_squares(a: Field, b: Field) -> Field {
+    square(a) + square(b)
+}
+
+#[oracle(get_price)]
+unconstrained fn get_price_oracle(item: Field) -> Field {}
+
+unconstrained fn get_price(item: Field) -> Field {
+    get_price_oracle(item)
+}
+
+/// Asks the host for a price through an oracle, then checks the order size.
+#[export]
+fn order_total(item: Field, qty: u32) -> Field {
+    assert(qty < 1000, f"qty {qty} too large");
+    println(qty);
+    // Safety: the price is supplied by the host and is not constrained.
+    let price = unsafe { get_price(item) };
+    price * (qty as Field)
+}
+
+/// Indexes an array of structs; an out-of-range `i` fails with the array's own size and index.
+#[export]
+fn pick(i: u32, points: [P; 2]) -> u32 {
+    points[i].y
+}

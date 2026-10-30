@@ -1,16 +1,21 @@
 [package]
 name = "noi-example-app"
 version = "0.1.0"
+# Example code; never published.
+publish = false
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 build = "build.rs"
 
+[features]
+# `cargo run -p noi-example-app --features prove` also proves and verifies (needs `bb`, see
+# scripts/install_bb.sh).
+prove = ["noi/prove"]
+
 [dependencies]
-anyhow.workspace = true
 noi = { path = "../../crates/noi" }
-noi-core = { path = "../../crates/noi-core" }
 
 [build-dependencies]
 noi-build = { path = "../../crates/noi-build" }

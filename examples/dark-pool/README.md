@@ -1,9 +1,11 @@
 # Dark-pool example (`noi-dark-pool-example`)
 
 A slightly more realistic scenario inspired by the [Mezcal](https://github.com/nemi-fi/mezcal)
-project: match/settle batched orders off-chain, then ship proofs + public inputs elsewhere.
+project: simulate matching and settling a batch of orders, using Noir structs (`Order`) and
+fixed-size arrays. It only simulates; the circuits do not commit to the orders, so proving them
+would attest to little. For an end-to-end prove/verify flow, see the demo's `above_threshold`.
 
-- `build.rs` runs `noi-build::export` against the embedded Noir program under `./noir`.
+- `build.rs` runs `noi_build::BuildOptions::from_env("noir")` against the embedded Noir program.
 - `src/main.rs` exercises both exported functions:
   - `match_orders` takes two `Order` structs plus a `min_size` threshold and returns whether the fill
     is valid.
@@ -16,5 +18,5 @@ Run it with:
 cargo run -p noi-dark-pool-example
 ```
 
-The sample Noir exports live under `./noir/export`, so the example produces deterministic results
-even without `nargo` installed.
+With `nargo` 1.0.x installed, the build re-exports from `./noir`; otherwise it uses the committed
+artifacts under `./noir/export`, so the example builds without the Noir toolchain.
