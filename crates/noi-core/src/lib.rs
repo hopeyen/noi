@@ -49,11 +49,35 @@ pub use export::{
 pub use prove::{Proof, Prover, VerifierTarget};
 #[cfg(feature = "runner")]
 pub use runtime::{
-    Client, Execution, ExecutionError, FromOutputValue, InputMap, InputValue, Program, ToInputValue,
+    Client, Execution, ExecutionError, FromValue, InputMap, OracleValue, Program, ToValue, Value,
 };
 
-/// The Noir release whose artifacts this build of `noi-core` can execute.
+/// The Noir release whose artifacts this build of `noi-core` decodes and executes.
 ///
-/// `nargo export` output from other versions may use a different bytecode encoding. Keep the
-/// `nargo` you export with in sync with this version (see `noirup --version`).
-pub const NOIR_VERSION: &str = "1.0.0-beta.26";
+/// `nargo export` output from other releases may use a different bytecode encoding. Export with
+/// this `nargo` (`noirup --version 1.0.0`); see [`noir_version_compatible`] for what is accepted.
+pub const NOIR_VERSION: &str = "1.0.0";
+
+/// Whether an artifact's `noir_version` (e.g. `1.0.0+275d3ab1…`) is one `noi` can execute.
+///
+/// The release part (before `+`) must be a stable `1.0.x` release; prereleases such as
+/// `1.0.0-beta.26` are rejected because their bytecode encoding differs.
+///
+/// ```
+/// assert!(noi_core::noir_version_compatible("1.0.0+275d3ab1a5c916c6"));
+/// assert!(noi_core::noir_version_compatible("1.0.3"));
+/// assert!(!noi_core::noir_version_compatible("1.0.0-beta.26+40d6574f"));
+/// assert!(!noi_core::noir_version_compatible("0.36.0"));
+/// ```
+pub fn noir_version_compatible(found: &str) -> bool {
+    let release = found.split('+').next().unwrap_or_default();
+    let mut ours = NOIR_VERSION.split('.');
+    let mut theirs = release.split('.');
+    // Same major.minor, and a numeric (non-prerelease) patch.
+    ours.next() == theirs.next()
+        && ours.next() == theirs.next()
+        && theirs
+            .next()
+            .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|b| b.is_ascii_digit()))
+        && theirs.next().is_none()
+}

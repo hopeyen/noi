@@ -28,10 +28,10 @@ field = ["noi-core/field", "noi-macro/field"]
 
 [dependencies]
 anyhow.workspace = true
-noi-core = { version = "0.0.2", default-features = false }
-noi-macro = { version = "0.0.2", default-features = false }
+noi-core = { version = "0.0.2", path = "../noi-core", default-features = false }
+noi-macro = { version = "0.0.2", path = "../noi-macro", default-features = false }
 
 [dev-dependencies]
 # Lets the build.rs snippet in the crate docs compile as a doctest.
-noi-build = { version = "0.0.2" }
+noi-build = { version = "0.0.2", path = "../noi-build" }
 tempfile.workspace = true

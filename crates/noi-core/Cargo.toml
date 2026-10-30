@@ -19,20 +19,19 @@ all-features = true
 
 [features]
 default = ["runner"]
-runner = ["dep:acvm", "dep:bn254_blackbox_solver", "dep:nargo", "dep:noirc_abi", "dep:noirc_artifacts"]
-prove = ["runner", "dep:tempfile"]
-field = ["dep:acvm"]
+runner = ["field", "dep:acvm", "dep:bn254_blackbox_solver"]
+prove = ["runner", "dep:sha2", "dep:tempfile"]
+field = ["dep:acir_field"]
 
 [dependencies]
 anyhow.workspace = true
 "fs-err".workspace = true
 serde.workspace = true
 serde_json.workspace = true
+acir_field = { workspace = true, optional = true }
 acvm = { workspace = true, optional = true }
 bn254_blackbox_solver = { workspace = true, optional = true }
-nargo = { workspace = true, optional = true }
-noirc_abi = { workspace = true, optional = true }
-noirc_artifacts = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]

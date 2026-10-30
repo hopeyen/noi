@@ -39,7 +39,7 @@ fn generated_prove_and_verify() {
         threshold: 100,
         secret: 250,
     };
-    let proof = demo::above_threshold::prove(&client, args).unwrap();
+    let proof = demo::above_threshold::prove(&client, &args).unwrap();
     assert!(demo::above_threshold::verify(&client, &proof).unwrap());
     assert_eq!(
         demo::above_threshold::verified_output(&client, &proof).unwrap(),
@@ -56,7 +56,7 @@ fn proving_a_failing_assertion_is_an_execution_error() {
         return;
     };
     let err =
-        demo::checked_div::prove(&client, demo::checked_div::Args { a: 1, b: 0 }).unwrap_err();
+        demo::checked_div::prove(&client, &demo::checked_div::Args { a: 1, b: 0 }).unwrap_err();
     assert!(
         err.downcast_ref::<noi::ExecutionError>().is_some(),
         "{err:#}"

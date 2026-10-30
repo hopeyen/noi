@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
-"""Fail if regenerated Noir exports differ from the committed ones in ABI or bytecode.
+"""Fail if `scripts/refresh_exports.sh` changed any committed Noir artifact.
 
-Artifacts embed absolute source paths in their debug info (`file_map`), which differ between
-machines, so a plain `git diff` cannot tell real drift from a different checkout location.
+Run it after the refresh script. The refresh script makes artifacts byte-reproducible (it rewrites
+the absolute source paths nargo embeds to repository-relative ones), so any difference, including
+an added or deleted artifact, means the committed exports are out of date.
 """
-import json
 import subprocess
 import sys
 
-paths = subprocess.run(
-    ["git", "ls-files", "--others", "--modified", "--exclude-standard",
-     "examples/*/noir/export/*.json", "crates/noi/tests/fixtures/demo/*.json"],
-    check=True, capture_output=True, text=True,
-).stdout.split()
+PATHS = [
+    "examples/demo/noir/export",
+    "examples/dark-pool/noir/export",
+    "crates/noi/tests/fixtures/demo",
+    "crates/noi-core/tests/fixtures/demo",
+]
 
-drift = []
-for path in paths:
-    committed = subprocess.run(["git", "show", f"HEAD:{path}"], capture_output=True, text=True)
-    if committed.returncode != 0:
-        drift.append(f"{path}: not committed")
-        continue
-    old, new = json.loads(committed.stdout), json.load(open(path))
-    for key in ("noir_version", "abi", "bytecode"):
-        if old.get(key) != new.get(key):
-            drift.append(f"{path}: `{key}` changed")
+root = subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True
+).stdout.strip()
+status = subprocess.run(
+    ["git", "status", "--porcelain", "--untracked-files=all", "--", *PATHS],
+    cwd=root, check=True, capture_output=True, text=True,
+).stdout
 
-if drift:
-    print("Noir exports are out of date; run scripts/refresh_exports.sh and commit:", *drift, sep="\n  ")
+if status.strip():
+    print("Noir exports are out of date; run scripts/refresh_exports.sh and commit:")
+    print(status, end="")
     sys.exit(1)
-print(f"exports up to date ({len(paths)} file(s) differ only in debug info)")
+print("exports up to date")

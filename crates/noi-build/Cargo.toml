@@ -17,8 +17,7 @@ categories = ["development-tools::build-utilities", "cryptography"]
 anyhow.workspace = true
 "fs-err".workspace = true
 # Schema-only (no Noir compiler crates); used for `NOIR_VERSION`.
-noi-core = { version = "0.0.2", default-features = false }
+noi-core = { version = "0.0.2", path = "../noi-core", default-features = false }
 serde_json.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+toml.workspace = true

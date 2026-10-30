@@ -9,26 +9,39 @@
 //!    verification key, and returns a [`Proof`] (proof bytes + public inputs).
 //! 3. [`Prover::verify`] checks a proof with `bb verify`.
 //!
-//! Verification keys depend only on the circuit and the [`VerifierTarget`], so they are computed
-//! once with `bb write_vk` and cached on disk, keyed by the artifact hash.
+//! # What a proof makes public
+//!
+//! Noir only allows `pub` on a program's `main`, so `#[export]` functions have no public
+//! parameters: **a proof's public inputs are exactly the function's return value**. Return any
+//! input the proof must commit to, and read the proven statement back with
+//! [`Proof::return_value`].
+//!
+//! # Verification keys and trust
+//!
+//! A verification key depends on the circuit, the [`VerifierTarget`], and the `bb` release, so it
+//! is computed once with `bb write_vk` and cached on disk under a SHA-256 of the artifact plus the
+//! target and `bb --version`.
 //!
 //! **The cache is trusted.** `verify` accepts any proof that checks out against the cached key,
 //! so whoever can write the cache can make forged proofs verify. The default location is
 //! per-user, it is created with mode `0700`, and on Unix `noi` refuses to use a cache directory
 //! that is not owned by the current user or is writable by group or others. Do not point
-//! `NOI_CACHE_DIR` at a shared directory. `bb` itself is pinned to
-//! [`BB_VERSION`], the release paired with [`crate::NOIR_VERSION`]; other versions may reject the
-//! bytecode.
+//! `NOI_CACHE_DIR` at a shared directory.
+//!
+//! `bb` must be release [`BB_VERSION`], the one paired with [`crate::NOIR_VERSION`]; the prover
+//! checks `bb --version` once and refuses other releases unless
+//! [`Prover::allow_any_bb_version`] is set.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use noi_core::{prove::Prover, runtime::{Client, InputMap, Program, ToInputValue}};
+//! use noi_core::{prove::Prover, runtime::{Client, InputMap, Program, ToValue}};
 //!
-//! let program = Program::from_file("noir/export/add.json")?;
-//! let mut inputs = InputMap::new();
-//! inputs.insert("a".into(), 2u32.to_input_value());
-//! inputs.insert("b".into(), 3u32.to_input_value());
+//! let program = Program::from_file("noir/export/above_threshold.json")?;
+//! let inputs = InputMap::from([
+//!     ("threshold".to_string(), 100u32.to_value()),
+//!     ("secret".to_string(), 250u32.to_value()),
+//! ]);
 //! let execution = program.execute(&Client::new(), &inputs)?;
 //!
 //! let prover = Prover::new();
@@ -43,23 +56,29 @@
 //! |---|---|
 //! | `NOI_BB_BIN` | `bb` executable (default: `bb` on `PATH`). `scripts/install_bb.sh` installs the pinned release. |
 //! | `NOI_CACHE_DIR` | Verification-key cache (default: `$XDG_CACHE_HOME/noi`, `~/Library/Caches/noi` on macOS, or `~/.cache/noi`). |
-//! | `BB_CRS_PATH`-style setups | Use [`Prover::with_crs_path`]; otherwise `bb` downloads the CRS on first use. |
+//!
+//! `bb` downloads its CRS on first use; pass [`Prover::with_crs_path`] to use a local copy.
+//! `BB_VERIFIER_TARGET` and `BB_SCHEME` in the environment are ignored, so a [`Prover`] always
+//! proves for the target it was configured with.
 
 use std::{
     ffi::OsStr,
     fmt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
+    sync::{Arc, OnceLock},
 };
 
 use acvm::AcirField;
 use anyhow::{anyhow, bail, Context, Result};
 use fs_err as fs;
+use sha2::{Digest, Sha256};
 
-use crate::runtime::{Execution, FieldElement, InputValue, Program};
+use crate::runtime::{abi, Execution, FieldElement, Program, Value};
 
-/// The Barretenberg release this crate is tested against (paired with [`crate::NOIR_VERSION`]).
-pub const BB_VERSION: &str = "5.0.0";
+/// The Barretenberg release paired with [`crate::NOIR_VERSION`] (Noir's `@aztec-foundation/bb.js`
+/// dependency).
+pub const BB_VERSION: &str = "6.0.0";
 
 /// Where a proof will be verified. Selects the transcript hash and zero-knowledge setting; proofs
 /// and verification keys are only valid for the target they were made for.
@@ -78,10 +97,8 @@ pub enum VerifierTarget {
     EvmNoZk,
     /// Recursive verification inside another Noir circuit (Poseidon2, ZK).
     NoirRecursive,
-    /// Recursive verification without zero knowledge.
+    /// Recursive verification inside another Noir circuit, without zero knowledge.
     NoirRecursiveNoZk,
-    /// Starknet verifier generated with Garaga (ZK).
-    Starknet,
 }
 
 impl VerifierTarget {
@@ -93,7 +110,6 @@ impl VerifierTarget {
             VerifierTarget::EvmNoZk => Some("evm-no-zk"),
             VerifierTarget::NoirRecursive => Some("noir-recursive"),
             VerifierTarget::NoirRecursiveNoZk => Some("noir-recursive-no-zk"),
-            VerifierTarget::Starknet => Some("starknet"),
         }
     }
 
@@ -104,15 +120,8 @@ impl VerifierTarget {
 
 /// A proof and the public inputs it commits to, in `bb`'s binary encoding.
 ///
-/// Both are sequences of 32-byte big-endian field elements.
-///
-/// # What is public
-///
-/// Noir only allows `pub` on a program's `main`, so `#[export]` functions have no public
-/// parameters: **the return value is the public input**. To commit a proof to an input, return
-/// it, e.g. `fn above(threshold: u32, secret: u32) -> (u32, bool)`.
-/// [`Proof::return_value`] decodes the public inputs back into the function's return type, which
-/// is what a verifier should check before trusting a proof.
+/// Both are sequences of 32-byte big-endian field elements. For an `#[export]` function the
+/// public inputs are its return value; [`Proof::return_value`] decodes them.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Proof {
@@ -138,32 +147,24 @@ impl Proof {
     ///
     /// # Errors
     ///
-    /// Fails if the byte length is not a multiple of 32.
+    /// Fails unless the bytes are a whole number of canonical 32-byte big-endian field elements
+    /// (each below the BN254 scalar modulus).
     pub fn public_inputs(&self) -> Result<Vec<FieldElement>> {
-        if self.public_inputs.len() % 32 != 0 {
-            bail!(
-                "public inputs are {} bytes, expected a multiple of 32",
-                self.public_inputs.len()
-            );
-        }
-        Ok(self
-            .public_inputs
-            .chunks_exact(32)
-            .map(FieldElement::from_be_bytes_reduce)
-            .collect())
+        decode_canonical_fields(&self.public_inputs, "public inputs")
     }
-}
 
-impl Proof {
-    /// Decodes the public inputs as `program`'s return value, i.e. the statement this proof
-    /// attests to. Returns `None` for functions that return nothing.
+    /// Decodes the public inputs as `program`'s return value: the statement this proof attests
+    /// to. Returns `None` for functions that return nothing.
+    ///
+    /// This does not verify the proof; call [`Prover::verify`] first (generated
+    /// `verified_output` functions do both).
     ///
     /// # Errors
     ///
-    /// Fails if the number of public inputs does not match the return type.
-    pub fn return_value(&self, program: &Program) -> Result<Option<InputValue>> {
+    /// Fails if the public inputs are malformed or do not match the return type.
+    pub fn return_value(&self, program: &Program) -> Result<Option<Value>> {
         let fields = self.public_inputs()?;
-        let Some(ret) = &program.abi().return_type else {
+        let Some(ty) = &program.function().return_type else {
             if fields.is_empty() {
                 return Ok(None);
             }
@@ -172,7 +173,7 @@ impl Proof {
                 program.name()
             );
         };
-        let expected = ret.abi_type.field_count() as usize;
+        let expected = abi::field_count(ty);
         if fields.len() != expected {
             bail!(
                 "proof has {} public inputs but `{}` returns {expected} field(s)",
@@ -180,9 +181,9 @@ impl Proof {
                 program.name()
             );
         }
-        noirc_abi::decode_value(&mut fields.into_iter(), &ret.abi_type, "return")
+        abi::decode_value(&mut fields.into_iter(), ty, "return")
             .map(Some)
-            .map_err(|err| anyhow!("decoding public inputs of `{}`: {err}", program.name()))
+            .with_context(|| format!("decoding the public inputs of `{}`", program.name()))
     }
 }
 
@@ -196,18 +197,53 @@ impl fmt::Debug for Proof {
     }
 }
 
+/// Splits `bytes` into canonical 32-byte big-endian field elements.
+fn decode_canonical_fields(bytes: &[u8], what: &str) -> Result<Vec<FieldElement>> {
+    if bytes.len() % 32 != 0 {
+        bail!(
+            "{what} are {} bytes, expected a multiple of 32",
+            bytes.len()
+        );
+    }
+    bytes
+        .chunks_exact(32)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let field = FieldElement::from_be_bytes_reduce(chunk);
+            // Reject values >= the modulus: they would be read differently by different tools.
+            if field.to_be_bytes() != chunk {
+                bail!("{what}: element {i} is not a canonical field element");
+            }
+            Ok(field)
+        })
+        .collect()
+}
+
 /// Proves and verifies with the Barretenberg `bb` CLI.
 ///
-/// Cheap to clone; holds only configuration. Every call runs `bb` in a fresh temporary directory,
-/// so a `Prover` can be shared across threads. The verification-key cache is written atomically,
-/// so concurrent provers (even in different processes) can share a cache directory.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
+/// Cheap to clone (configuration plus a shared, lazily checked `bb` version). Every call runs
+/// `bb` in a fresh temporary directory, so a `Prover` can be shared across threads, and the
+/// verification-key cache is written atomically, so concurrent provers (even in different
+/// processes) can share a cache directory.
+#[derive(Clone)]
 pub struct Prover {
     bb: PathBuf,
     target: VerifierTarget,
     crs_path: Option<PathBuf>,
     cache_dir: PathBuf,
+    any_bb_version: bool,
+    bb_version: Arc<OnceLock<Result<String, String>>>,
+}
+
+impl fmt::Debug for Prover {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Prover")
+            .field("bb", &self.bb)
+            .field("target", &self.target)
+            .field("crs_path", &self.crs_path)
+            .field("cache_dir", &self.cache_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for Prover {
@@ -222,17 +258,21 @@ impl Prover {
     pub fn new() -> Self {
         Self {
             bb: std::env::var_os("NOI_BB_BIN")
+                .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "bb".into()),
             target: VerifierTarget::Default,
             crs_path: None,
             cache_dir: default_cache_dir(),
+            any_bb_version: false,
+            bb_version: Arc::default(),
         }
     }
 
     /// Uses a specific `bb` executable.
     pub fn with_bb(mut self, bb: impl Into<PathBuf>) -> Self {
         self.bb = bb.into();
+        self.bb_version = Arc::default();
         self
     }
 
@@ -255,6 +295,13 @@ impl Prover {
         self
     }
 
+    /// Accepts any `bb` release instead of requiring [`BB_VERSION`]. Proofs and keys from
+    /// different releases are generally incompatible; use this only for testing newer releases.
+    pub fn allow_any_bb_version(mut self, allow: bool) -> Self {
+        self.any_bb_version = allow;
+        self
+    }
+
     /// The configured verifier target.
     pub fn target(&self) -> VerifierTarget {
         self.target
@@ -267,25 +314,27 @@ impl Prover {
     ///
     /// # Errors
     ///
-    /// Fails if `bb` is missing or rejects the bytecode.
+    /// Fails if `bb` is missing, is the wrong release, or rejects the bytecode.
     pub fn verification_key(&self, program: &Program) -> Result<Vec<u8>> {
         let path = self.vk_path(program)?;
-        fs::read(&path).context("reading cached verification key")
+        read_vk(&path)
     }
 
     /// Proves `execution`, which must come from `program.execute(..)`.
     ///
     /// # Errors
     ///
-    /// Fails if `bb` is missing, the witness does not satisfy the circuit, or `bb` fails.
+    /// Fails if `bb` is missing or the wrong release, or if `bb prove` fails.
     pub fn prove(&self, program: &Program, execution: &Execution) -> Result<Proof> {
         let vk = self.vk_path(program)?;
         let work = tempfile::tempdir().context("creating a temporary directory for bb")?;
         let bytecode = write_bytecode(program, work.path())?;
         let witness = work.path().join("witness.gz");
         fs::write(&witness, execution.witness_bytes()?)?;
+        let out = work.path().join("out");
+        fs::create_dir(&out)?;
 
-        self.run(
+        let output = self.run(
             "prove",
             [
                 "-b".as_ref(),
@@ -295,27 +344,30 @@ impl Prover {
                 "-k".as_ref(),
                 vk.as_os_str(),
                 "-o".as_ref(),
-                work.path().as_os_str(),
+                out.as_os_str(),
             ],
-        )
-        .with_context(|| format!("proving `{}`", program.name()))?;
+        )?;
+        ensure_success("prove", &output)
+            .with_context(|| format!("proving `{}`", program.name()))?;
 
         Ok(Proof {
-            proof: fs::read(work.path().join("proof"))?,
-            public_inputs: fs::read(work.path().join("public_inputs"))?,
+            proof: fs::read(out.join("proof"))?,
+            public_inputs: fs::read(out.join("public_inputs"))?,
             target: self.target,
         })
     }
 
     /// Verifies `proof` against `program`'s verification key.
     ///
-    /// Returns `Ok(false)` when `bb` rejects the proof (including malformed proofs) and `Err` only
-    /// when verification could not run.
+    /// Returns `Ok(false)` when the proof is invalid: `bb` rejects it, or its bytes are not in
+    /// `bb`'s canonical binary encoding (for example JSON, which `bb` would otherwise interpret
+    /// differently from [`Proof::return_value`]).
     ///
     /// # Errors
     ///
-    /// Fails if `bb` is missing, crashes, or `proof` was made for a different
-    /// [`VerifierTarget`] than this prover's.
+    /// Fails if verification could not run: `bb` is missing or the wrong release, the cached key
+    /// is unreadable, `bb` reports an error other than a rejected proof, or `proof` was made for
+    /// a different [`VerifierTarget`] than this prover's.
     pub fn verify(&self, program: &Program, proof: &Proof) -> Result<bool> {
         if proof.target != self.target {
             bail!(
@@ -324,45 +376,45 @@ impl Prover {
                 self.target
             );
         }
-        let vk = self.vk_path(program)?;
+        if !is_canonical_binary(&proof.proof, "proof")
+            || !is_canonical_binary(&proof.public_inputs, "public inputs")
+        {
+            return Ok(false);
+        }
+        // Read the key first so a missing or unreadable cache entry is an error, not "invalid".
+        let vk = read_vk(&self.vk_path(program)?)?;
+
         let work = tempfile::tempdir().context("creating a temporary directory for bb")?;
-        let proof_path = work.path().join("proof");
-        let inputs_path = work.path().join("public_inputs");
+        let (proof_path, inputs_path, vk_path) = (
+            work.path().join("proof"),
+            work.path().join("public_inputs"),
+            work.path().join("vk"),
+        );
         fs::write(&proof_path, &proof.proof)?;
         fs::write(&inputs_path, &proof.public_inputs)?;
+        fs::write(&vk_path, vk)?;
 
-        let output = self
-            .command(
-                "verify",
-                [
-                    "-p".as_ref(),
-                    proof_path.as_os_str(),
-                    "-i".as_ref(),
-                    inputs_path.as_os_str(),
-                    "-k".as_ref(),
-                    vk.as_os_str(),
-                ],
-            )?
-            .output()
-            .with_context(|| self.missing_bb_hint())?;
-        // `bb verify` exits 0 for a valid proof and 1 for an invalid one; anything else (e.g. a
-        // signal) is a tooling failure.
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => bail!(
-                "`bb verify` failed with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        }
+        let output = self.run(
+            "verify",
+            [
+                "-v".as_ref(),
+                "-p".as_ref(),
+                proof_path.as_os_str(),
+                "-i".as_ref(),
+                inputs_path.as_os_str(),
+                "-k".as_ref(),
+                vk_path.as_os_str(),
+            ],
+        )?;
+        classify_verify(&output)
     }
 
     /// Generates a Solidity verifier contract for `program`.
     ///
     /// # Errors
     ///
-    /// Fails unless the target is [`VerifierTarget::Evm`] or [`VerifierTarget::EvmNoZk`].
+    /// Fails unless the target is [`VerifierTarget::Evm`] or [`VerifierTarget::EvmNoZk`], or if
+    /// `bb` fails.
     pub fn solidity_verifier(&self, program: &Program) -> Result<String> {
         if !matches!(self.target, VerifierTarget::Evm | VerifierTarget::EvmNoZk) {
             bail!("Solidity verifiers require VerifierTarget::Evm or VerifierTarget::EvmNoZk");
@@ -370,7 +422,7 @@ impl Prover {
         let vk = self.vk_path(program)?;
         let work = tempfile::tempdir()?;
         let out = work.path().join("Verifier.sol");
-        self.run(
+        let output = self.run(
             "write_solidity_verifier",
             [
                 "-k".as_ref(),
@@ -379,21 +431,54 @@ impl Prover {
                 out.as_os_str(),
             ],
         )?;
+        ensure_success("write_solidity_verifier", &output)?;
         Ok(fs::read_to_string(out)?)
+    }
+
+    /// Checks `bb --version` once per prover (shared by clones).
+    fn checked_bb_version(&self) -> Result<&str> {
+        let version = self.bb_version.get_or_init(|| {
+            let output = Command::new(&self.bb)
+                .arg("--version")
+                .output()
+                .map_err(|err| format!("{}: {err}", self.missing_bb_hint()))?;
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !output.status.success() || version.is_empty() {
+                return Err(format!("`{} --version` failed", self.bb.display()));
+            }
+            Ok(version)
+        });
+        let version = version.as_deref().map_err(|err| anyhow!("{err}"))?;
+        if !self.any_bb_version && version != BB_VERSION {
+            bail!(
+                "`{}` is bb {version}, but noi requires bb {BB_VERSION} (paired with Noir {}); \
+                 install it with `bbup -v {BB_VERSION}` or scripts/install_bb.sh, or opt out \
+                 with Prover::allow_any_bb_version",
+                self.bb.display(),
+                crate::NOIR_VERSION
+            );
+        }
+        Ok(version)
     }
 
     /// Path of the cached verification key, computing it if needed.
     fn vk_path(&self, program: &Program) -> Result<PathBuf> {
-        // The artifact hash identifies the compiled circuit; the bb version and target change
-        // the key's format and contents.
-        let dir = self.cache_dir.join(format!(
-            "{}-{:016x}-bb{}-{}",
-            program.name(),
-            program.artifact_hash(),
-            BB_VERSION,
-            self.target.cache_tag()
-        ));
+        let bb_version = self.checked_bb_version()?;
+        // Key on the exact artifact bytes (not the self-reported `hash`, which does not cover
+        // codegen), the target, and the bb release. The name is only a readable, sanitized prefix.
+        let mut hasher = Sha256::new();
+        hasher.update(program.artifact_json().as_bytes());
+        hasher.update([0]);
+        hasher.update(self.target.cache_tag().as_bytes());
+        hasher.update([0]);
+        hasher.update(bb_version.as_bytes());
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = self
+            .cache_dir
+            .join(format!("{}-{}", sanitize_name(program.name()), &hex[..32]));
         let vk = dir.join("vk");
+
         // Validate before trusting anything already in the cache.
         ensure_private_dir(&self.cache_dir)?;
         if vk.is_file() {
@@ -405,7 +490,7 @@ impl Prover {
         let bytecode = write_bytecode(program, work.path())?;
         let out = work.path().join("out");
         fs::create_dir(&out)?;
-        self.run(
+        let output = self.run(
             "write_vk",
             [
                 "-b".as_ref(),
@@ -413,8 +498,10 @@ impl Prover {
                 "-o".as_ref(),
                 out.as_os_str(),
             ],
-        )
-        .with_context(|| format!("computing the verification key of `{}`", program.name()))?;
+        )?;
+        ensure_success("write_vk", &output)
+            .with_context(|| format!("computing the verification key of `{}`", program.name()))?;
+        read_vk(&out.join("vk"))?;
 
         // Publish atomically: if another process won the race, keep its (identical) key.
         match std::fs::rename(&out, &dir) {
@@ -427,43 +514,105 @@ impl Prover {
         Ok(vk)
     }
 
-    fn command<'a>(
+    fn run<'a>(
         &self,
         subcommand: &str,
         args: impl IntoIterator<Item = &'a OsStr>,
-    ) -> Result<Command> {
+    ) -> Result<Output> {
         let mut cmd = Command::new(&self.bb);
-        cmd.arg(subcommand).args(args);
+        cmd.arg(subcommand)
+            .args(["--scheme", "ultra_honk"])
+            .args(args)
+            // These would silently override the target and scheme chosen above.
+            .env_remove("BB_VERIFIER_TARGET")
+            .env_remove("BB_SCHEME");
         if let Some(target) = self.target.as_bb_arg() {
             cmd.args(["-t", target]);
         }
         if let Some(crs) = &self.crs_path {
             cmd.arg("-c").arg(crs);
         }
-        Ok(cmd)
-    }
-
-    fn run<'a>(&self, subcommand: &str, args: impl IntoIterator<Item = &'a OsStr>) -> Result<()> {
-        let output = self
-            .command(subcommand, args)?
-            .output()
-            .with_context(|| self.missing_bb_hint())?;
-        if !output.status.success() {
-            bail!(
-                "`bb {subcommand}` failed with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
+        cmd.output().with_context(|| self.missing_bb_hint())
     }
 
     fn missing_bb_hint(&self) -> String {
         format!(
             "could not run `{}`; install Barretenberg {BB_VERSION} (`bbup -v {BB_VERSION}` or \
-             `scripts/install_bb.sh`) and/or set NOI_BB_BIN",
+             scripts/install_bb.sh) and/or set NOI_BB_BIN",
             self.bb.display()
         )
+    }
+}
+
+fn ensure_success(subcommand: &str, output: &Output) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "`bb {subcommand}` failed with {}: {}",
+        output.status,
+        bb_messages(output)
+    )
+}
+
+/// `bb`'s diagnostic lines, without the memory-usage suffixes it appends.
+fn bb_messages(output: &Output) -> String {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    text.lines()
+        .map(|line| line.split(" (mem:").next().unwrap_or(line).trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Interprets `bb verify -v`. bb 6 exits 1 both for a rejected proof and for errors such as a
+/// malformed key; it prints `Proof verification failed: <reason>` only in the latter case.
+fn classify_verify(output: &Output) -> Result<bool> {
+    let messages = bb_messages(output);
+    match output.status.code() {
+        Some(0) if messages.contains("verified: 1") => Ok(true),
+        Some(1)
+            if messages.contains("verified: 0")
+                && !messages.contains("Proof verification failed:") =>
+        {
+            Ok(false)
+        }
+        _ => bail!("`bb verify` failed with {}: {messages}", output.status),
+    }
+}
+
+/// Whether `bytes` are canonical field elements that `bb` will read as binary.
+///
+/// `bb` parses any input that is valid JSON as JSON, so a crafted file could make `bb` check a
+/// different statement than [`Proof::return_value`] decodes.
+fn is_canonical_binary(bytes: &[u8], what: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes).is_err()
+        && decode_canonical_fields(bytes, what).is_ok()
+}
+
+fn read_vk(path: &Path) -> Result<Vec<u8>> {
+    let vk = fs::read(path).context("reading the verification key")?;
+    if vk.is_empty() {
+        bail!("the verification key at {} is empty", path.display());
+    }
+    Ok(vk)
+}
+
+/// Keeps `[A-Za-z0-9_]`, so a caller-chosen program name cannot escape the cache directory.
+fn sanitize_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect();
+    if cleaned.is_empty() {
+        "program".to_owned()
+    } else {
+        cleaned
     }
 }
 
@@ -501,14 +650,17 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
             .mode(0o700)
             .create(dir)
             .with_context(|| format!("creating the noi cache at {}", dir.display()))?;
-        let meta = fs::metadata(dir)?;
+        // `symlink_metadata`: a symlink planted in place of the cache must not redirect it.
+        let meta = fs::symlink_metadata(dir)?;
         // std has no `getuid`; a file we just created carries our effective uid.
         let probe = tempfile::NamedTempFile::new_in(dir)
             .with_context(|| format!("the noi cache at {} is not writable", dir.display()))?;
         let our_uid = probe.as_file().metadata()?.uid();
-        if meta.uid() != our_uid || meta.mode() & 0o022 != 0 {
+        if !meta.is_dir() || meta.uid() != our_uid || meta.mode() & 0o022 != 0 {
             bail!(
-                "refusing to use the noi cache at {}: it must be owned by the current user and not                  writable by group or others (run `chmod 700` on it, or set NOI_CACHE_DIR)",
+                "refusing to use the noi cache at {}: it must be a directory owned by the current \
+                 user and not writable by group or others (run `chmod 700` on it, or set \
+                 NOI_CACHE_DIR)",
                 dir.display()
             );
         }
@@ -520,16 +672,22 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
 
 fn write_bytecode(program: &Program, dir: &Path) -> Result<PathBuf> {
     let path = dir.join("program.json");
-    let json = program
-        .to_json()
-        .map_err(|err| anyhow!("re-encoding `{}`: {err}", program.name()))?;
-    fs::write(&path, json)?;
+    fs::write(&path, program.artifact_json())?;
     Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture(name: &str) -> Program {
+        Program::from_file(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/demo")
+                .join(format!("{name}.json")),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn public_inputs_decode_big_endian() {
@@ -544,9 +702,44 @@ mod tests {
     }
 
     #[test]
-    fn misaligned_public_inputs_are_rejected() {
-        let proof = Proof::from_parts(vec![], vec![0; 33], VerifierTarget::Default);
-        assert!(proof.public_inputs().is_err());
+    fn non_canonical_or_json_inputs_are_rejected() {
+        let misaligned = Proof::from_parts(vec![], vec![0; 33], VerifierTarget::Default);
+        assert!(misaligned.public_inputs().is_err());
+        let above_modulus = Proof::from_parts(vec![], vec![0xff; 32], VerifierTarget::Default);
+        assert!(above_modulus.public_inputs().is_err());
+
+        // Valid JSON padded to a multiple of 32 bytes with leading spaces: every chunk starts
+        // with a byte below the modulus' top byte, so only the JSON check catches it.
+        let json = br#"{"public_inputs":["0x0a","0x01"]}"#;
+        let mut padded = vec![b' '; 64 - json.len()];
+        padded.extend_from_slice(json);
+        assert!(!is_canonical_binary(&padded, "public inputs"));
+    }
+
+    #[test]
+    fn names_cannot_escape_the_cache() {
+        assert_eq!(sanitize_name("../../etc/passwd"), "etcpasswd");
+        assert_eq!(sanitize_name("/abs"), "abs");
+        assert_eq!(sanitize_name("..."), "program");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_output_is_classified() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stderr: &str| Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        assert!(classify_verify(&out(0, "verified: 1 (mem: 1 MiB)")).unwrap());
+        assert!(!classify_verify(&out(1, "Proof verification failed\nverified: 0")).unwrap());
+        assert!(classify_verify(&out(
+            1,
+            "verified: 0\nProof verification failed: invalid VK size. Expected 3680 bytes, got 100"
+        ))
+        .is_err());
+        assert!(classify_verify(&out(2, "")).is_err());
     }
 
     #[cfg(unix)]
@@ -558,6 +751,10 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
         let err = ensure_private_dir(dir.path()).unwrap_err();
         assert!(err.to_string().contains("refusing"), "{err}");
+        assert!(
+            !err.to_string().contains("  "),
+            "message has stray spaces: {err}"
+        );
 
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         ensure_private_dir(dir.path()).unwrap();
@@ -580,12 +777,7 @@ mod tests {
         let prover = Prover::new()
             .with_bb("/definitely/not/bb")
             .with_cache_dir(tempfile::tempdir().unwrap().path());
-        let program = Program::from_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/demo/noir/export/add.json"
-        ))
-        .unwrap();
-        let err = prover.verification_key(&program).unwrap_err();
+        let err = prover.verification_key(&fixture("add")).unwrap_err();
         assert!(
             format!("{err:#}").contains("install Barretenberg"),
             "{err:#}"

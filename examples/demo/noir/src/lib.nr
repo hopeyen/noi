@@ -54,3 +54,31 @@ fn greet(name: str<5>) -> str<5> {
 fn above_threshold(threshold: u32, secret: u32) -> (u32, bool) {
     (threshold, secret > threshold)
 }
+
+/// Compiled as its own ACIR circuit (`#[fold]`), so callers exercise ACIR-to-ACIR calls.
+#[fold]
+fn square(x: Field) -> Field {
+    x * x
+}
+
+#[export]
+fn sum_of_squares(a: Field, b: Field) -> Field {
+    square(a) + square(b)
+}
+
+#[oracle(get_price)]
+unconstrained fn get_price_oracle(item: Field) -> Field {}
+
+unconstrained fn get_price(item: Field) -> Field {
+    get_price_oracle(item)
+}
+
+/// Asks the host for a price through an oracle, then checks the order size.
+#[export]
+fn order_total(item: Field, qty: u32) -> Field {
+    assert(qty < 1000, f"qty {qty} too large");
+    println(qty);
+    // Safety: the price is supplied by the host and is not constrained.
+    let price = unsafe { get_price(item) };
+    price * (qty as Field)
+}

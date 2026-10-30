@@ -1,15 +1,16 @@
 {
-  "noir_version": "1.0.0-beta.26",
+  "noir_version": "1.0.0",
   "abi": {
     "parameters": [
       {"name": "type", "type": {"kind": "struct", "path": "orders::Order", "fields": [
         {"name": "self", "type": {"kind": "integer", "sign": "unsigned", "width": 1}},
         {"name": "fills", "type": {"kind": "array", "length": 64, "type": {"kind": "field"}}}
-      ]}, "visibility": "public"},
-      {"name": "other", "type": {"kind": "struct", "path": "book::Order", "fields": [
-        {"name": "memo", "type": {"kind": "string", "length": 8}}
       ]}, "visibility": "private"},
-      {"name": "callData", "type": {"kind": "integer", "sign": "signed", "width": 64}, "visibility": "databus"}
+      {"name": "other", "type": {"kind": "struct", "path": "book::Order", "fields": [
+        {"name": "fields", "type": {"kind": "string", "length": 8}},
+        {"name": "value", "type": {"kind": "boolean"}}
+      ]}, "visibility": "private"},
+      {"name": "callData", "type": {"kind": "integer", "sign": "signed", "width": 64}, "visibility": "private"}
     ],
     "return_type": null,
     "error_types": {}

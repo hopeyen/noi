@@ -6,9 +6,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# bb release paired with Noir v1.0.0-beta.26 (see `@aztec/bb.js` in Noir's integration tests).
+# bb release paired with Noir v1.0.0 (see `@aztec-foundation/bb.js` in Noir's integration tests).
 # Keep in sync with `noi_core::prove::BB_VERSION`.
-BB_VERSION="5.0.0"
+BB_VERSION="6.0.0"
 INSTALL_DIR="${ROOT_DIR}/target/bb-bin/${BB_VERSION}"
 BB_BIN="${INSTALL_DIR}/bb"
 

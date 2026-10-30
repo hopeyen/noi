@@ -9,10 +9,10 @@ fn generated_types_are_usable() {
         p: demo::P { x: 1, y: 2 },
         dx: -1,
     };
-    let inputs: demo::move_point::Inputs = args.clone().into();
-    assert_eq!(demo::move_point::Args::from(inputs), args);
+    assert_eq!(args.clone(), args);
     assert_eq!(
         demo::move_point::SIGNATURE,
         "fn move_point(p: P, dx: i32) -> P"
     );
+    let _: demo::move_point::Output = demo::P::default();
 }

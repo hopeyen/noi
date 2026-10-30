@@ -45,7 +45,27 @@ jobs:
           cargo test -p noi-core --no-default-features
           cargo test -p noi --no-default-features --tests
       - name: Field without runner
-        run: cargo check -p noi --no-default-features --features field
+        run: |
+          cargo check -p noi --no-default-features --features field
+          cargo check -p noi-core --no-default-features --features field
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --all-features
+
+  package:
+    # Packages every publishable crate and builds it from the packaged sources, exactly as
+    # `cargo publish` would, then runs the tests shipped inside each package.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --workspace --exclude noi-example-app --exclude noi-dark-pool-example
 
   prove:
     runs-on: ubuntu-latest
@@ -57,7 +77,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install bb
-        run: echo "NOI_BB_BIN=$(scripts/install_bb.sh)" >> "$GITHUB_ENV"
+        # A separate assignment so a failed install fails the step.
+        run: |
+          bb="$(scripts/install_bb.sh)"
+          echo "NOI_BB_BIN=$bb" >> "$GITHUB_ENV"
       - run: cargo test -p noi-core -p noi --features noi-core/prove,noi/prove
       - run: cargo run -p noi-example-app --features prove
 

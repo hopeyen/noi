@@ -2,9 +2,10 @@
 //! Alloy's `sol!`.
 //!
 //! You write a Noir library, mark functions with `#[export]`, and `noi` generates a Rust module per
-//! function with typed arguments, a typed output, and a `simulate` function that runs the circuit
-//! in-process. A mismatch between your Rust code and the Noir ABI becomes a compile error rather
-//! than a runtime witness-encoding failure.
+//! function with a typed `Args` struct, a typed `Output`, and a `simulate` function that runs the
+//! circuit in-process. With the `prove` feature it also proves and verifies with Barretenberg. A
+//! mismatch between your Rust code and the Noir ABI is a compile error, not a runtime
+//! witness-encoding failure.
 //!
 //! # Quickstart
 //!
@@ -32,12 +33,11 @@
 //! ```
 //!
 //! ```no_run
-//! // build.rs: runs `nargo export` and tells `nrg!` where the artifacts are.
+//! // build.rs: runs `nargo export` (into OUT_DIR) and tells `nrg!` where the artifacts are.
 //! fn main() {
 //!     noi_build::BuildOptions::from_env("noir")
-//!         .expect("OUT_DIR is set by cargo")
-//!         .export()
-//!         .expect("failed to export Noir artifacts");
+//!         .and_then(|opts| opts.export())
+//!         .unwrap_or_else(|err| panic!("failed to export Noir artifacts: {err:#}"));
 //! }
 //! ```
 //!
@@ -50,13 +50,13 @@
 //! # fn main() -> noi::Result<()> {
 //! let client = demo::Client::new();
 //!
-//! let sum = demo::add::simulate(&client, demo::add::Args { a: 2, b: 3 })?;
+//! let sum = demo::add::simulate(&client, &demo::add::Args { a: 2, b: 3 })?;
 //! assert_eq!(sum, 5);
 //!
 //! // Noir structs become Rust structs; signed integers are handled for you.
 //! let p = demo::move_point::simulate(
 //!     &client,
-//!     demo::move_point::Args { p: demo::P { x: 10, y: 3 }, dx: -4 },
+//!     &demo::move_point::Args { p: demo::P { x: 10, y: 3 }, dx: -4 },
 //! )?;
 //! assert_eq!(p, demo::P { x: 6, y: 3 });
 //! # Ok(())
@@ -69,27 +69,23 @@
 //!
 //! ```ignore
 //! pub mod demo {
-//!     pub use noi::Client;                // execution settings, see `Client`
-//!     pub struct P { pub x: u32, pub y: u32 }   // one Rust struct per Noir struct
+//!     pub use noi::Client;                       // execution settings, see `Client`
+//!     pub struct P { pub x: u32, pub y: u32 }    // one Rust struct per Noir struct
 //!
 //!     pub mod add {
 //!         pub const NAME: &str = "add";
 //!         pub const SIGNATURE: &str = "fn add(a: u32, b: u32) -> u32";
 //!         pub const ARTIFACT_JSON: &str = /* embedded nargo export artifact */;
 //!
-//!         pub struct Args { pub a: u32, pub b: u32 }      // every parameter, in order
-//!         pub struct PublicInputs {}                      // `pub`/databus parameters (see below)
-//!         pub struct PrivateInputs { pub a: u32, pub b: u32 }
-//!         pub struct Inputs { pub public: PublicInputs, pub private: PrivateInputs }
-//!         // From<Args> for Inputs, From<Inputs> for Args
+//!         pub struct Args { pub a: u32, pub b: u32 }     // every parameter, in order
 //!         pub type Output = u32;
 //!
-//!         pub fn simulate(client: &Client, inputs: impl Into<Inputs>) -> noi::Result<Output>;
-//!         pub fn execute(client: &Client, inputs: impl Into<Inputs>) -> noi::Result<noi::Execution>;
+//!         pub fn simulate(client: &Client, args: &Args) -> noi::Result<Output>;
+//!         pub fn execute(client: &Client, args: &Args) -> noi::Result<noi::Execution>;
 //!         pub fn program() -> noi::Result<&'static noi::Program>;
 //!
 //!         // feature `prove`:
-//!         pub fn prove(client: &Client, inputs: impl Into<Inputs>) -> noi::Result<noi::Proof>;
+//!         pub fn prove(client: &Client, args: &Args) -> noi::Result<noi::Proof>;
 //!         pub fn verify(client: &Client, proof: &noi::Proof) -> noi::Result<bool>;
 //!         pub fn verified_output(client: &Client, proof: &noi::Proof) -> noi::Result<Output>;
 //!         pub fn verification_key(client: &Client) -> noi::Result<Vec<u8>>;
@@ -99,11 +95,8 @@
 //! ```
 //!
 //! Generated structs derive `Clone`, `Debug`, `PartialEq`, and (when every field allows it)
-//! `Default`. Run with `NOI_DEBUG=1` to write the expanded code to `target/noi/<module>.rs`.
-//!
-//! Noir 1.0 only accepts `pub` on a program's `main`, so the parameters of `#[export]` functions
-//! are always private and `PublicInputs` is usually empty. It is populated for databus
-//! (`call_data`) parameters and for artifacts whose ABI marks parameters public.
+//! `Default`. Run with `NOI_DEBUG=1` to write the expanded code to
+//! `target/noi/<crate>/<module>.rs`.
 //!
 //! ## Type mapping
 //!
@@ -113,40 +106,72 @@
 //! | `u8` … `u128`, `i8` … `i64` | `u8` … `u128`, `i8` … `i64` |
 //! | `Field` | [`FieldElement`] |
 //! | `[T; N]` | `[T; N]` |
-//! | `(A, B, …)` | `(A, B, …)` |
-//! | `str<N>` | `String` (length checked at execution) |
-//! | `struct S { … }` | `demo::S` (named after the last path segment; the full path is used if two structs share a name) |
+//! | `(A, B, …)`, up to 12 elements | `(A, B, …)` |
+//! | `str<N>` | `String` (must be exactly `N` bytes at execution) |
+//! | `struct S { … }` | `demo::S` |
 //!
-//! Parameter and field names are converted to `snake_case`; Rust keywords are escaped
-//! (`move` → `r#move`).
+//! Struct naming: a struct is named after the last segment of its Noir path. If structs from
+//! different paths share that name, the full path is used (`orders::Order` → `OrdersOrder`). Names
+//! that would clash with `Client` or a prelude type get a `Noir` prefix (`std::option::Option` →
+//! `NoirOption`). Each instantiation of a generic struct is its own Rust struct, numbered in
+//! order of first use (`NoirOption`, `NoirOption2`), because Noir's ABI does not record generic
+//! arguments.
+//!
+//! Function, parameter, and field names are converted to `snake_case`, and Rust keywords are
+//! escaped (`move` → `r#move`, `self` → `self_`). Two Noir names that map to the same Rust name
+//! (`fooBar` and `foo_bar`) are a compile error naming both.
 //!
 //! # Errors
 //!
 //! Every fallible function returns [`noi::Result`](Result). When a Noir `assert` fails, the error
-//! contains an [`ExecutionError`] carrying the assertion message:
+//! contains an [`ExecutionError`] carrying the assertion message, with format strings filled in:
 //!
 //! ```
 //! # noi::nrg!(module = demo, export_dir = "tests/fixtures/demo");
 //! # let client = demo::Client::new();
 //! // Noir: fn checked_div(a: u32, b: u32) -> u32 { assert(b != 0, "division by zero"); a / b }
-//! let err = demo::checked_div::simulate(&client, demo::checked_div::Args { a: 1, b: 0 })
+//! let err = demo::checked_div::simulate(&client, &demo::checked_div::Args { a: 1, b: 0 })
 //!     .unwrap_err();
 //! let exec = err.downcast_ref::<noi::ExecutionError>().unwrap();
 //! assert_eq!(exec.function(), "checked_div");
 //! assert_eq!(exec.message(), Some("division by zero"));
 //! ```
 //!
+//! # Oracles
+//!
+//! Unconstrained Noir code can ask the host for data through oracles. Answer them with
+//! [`Client::with_oracle`]; unhandled oracles fail the execution, and `println` output is
+//! discarded.
+//!
+//! ```
+//! # noi::nrg!(module = demo, export_dir = "tests/fixtures/demo");
+//! # fn main() -> noi::Result<()> {
+//! use noi::{FieldElement, OracleValue};
+//!
+//! // Noir: #[oracle(get_price)] unconstrained fn get_price_oracle(item: Field) -> Field {}
+//! let client = demo::Client::new().with_oracle("get_price", |_args| {
+//!     Ok(vec![OracleValue::Field(FieldElement::from(250u128))])
+//! });
+//! let total = demo::order_total::simulate(
+//!     &client,
+//!     &demo::order_total::Args { item: FieldElement::from(7u128), qty: 4 },
+//! )?;
+//! assert_eq!(total, FieldElement::from(1000u128));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Proving
 //!
 //! With the `prove` feature, each function also gets `prove`, `verify`, `verified_output`,
 //! `verification_key`, and `solidity_verifier`, backed by Aztec's Barretenberg `bb` CLI
-//! (UltraHonk). Install the matching release (`noi::BB_VERSION`, currently 5.0.0) with `bbup -v 5.0.0`
-//! or the repository's `scripts/install_bb.sh`, and point `NOI_BB_BIN` at it if it is not on
-//! `PATH`.
+//! (UltraHonk). Install the matching release (`noi::BB_VERSION`, currently 6.0.0) with
+//! `bbup -v 6.0.0` or the repository's `scripts/install_bb.sh`, and point `NOI_BB_BIN` at it if
+//! it is not on `PATH`.
 //!
-//! **The return value is the public statement.** `#[export]` functions cannot have `pub`
-//! parameters, so a proof's public inputs are exactly the function's return value. Return any
-//! input the proof must commit to:
+//! **The return value is the public statement.** Noir only accepts `pub` on a program's `main`,
+//! so `#[export]` functions have no public parameters, and a proof's public inputs are exactly the
+//! function's return value. Return any input the proof must commit to:
 //!
 //! ```text
 //! #[export]
@@ -164,7 +189,7 @@
 //!
 //! // Prover side.
 //! let args = demo::above_threshold::Args { threshold: 100, secret: 250 };
-//! let proof = demo::above_threshold::prove(&client, args)?;
+//! let proof = demo::above_threshold::prove(&client, &args)?;
 //!
 //! // Verifier side: checks the proof and decodes what it proves.
 //! let (threshold, above) = demo::above_threshold::verified_output(&client, &proof)?;
@@ -178,10 +203,10 @@
 //! # fn main() {}
 //! ```
 //!
-//! Verification keys are computed once per circuit and verifier target and cached on disk
-//! (`$NOI_CACHE_DIR`, default: the per-user cache directory). The cache is trusted, so `noi`
-//! creates it private and refuses one other users can write. Proofs from a browser (`bb.js`) can be checked with
-//! `noi::Proof::from_parts` and `verify`.
+//! Verification keys are computed once per circuit, verifier target, and `bb` release, and cached
+//! on disk (`$NOI_CACHE_DIR`, default: the per-user cache directory). The cache is trusted, so
+//! `noi` creates it private and refuses one other users can write. Proofs from a browser
+//! (`bb.js`) can be checked with `noi::Proof::from_parts` and `verify`.
 //!
 //! # Performance
 //!
@@ -192,17 +217,17 @@
 //!
 //! # Features
 //!
-//! - `runner` *(default)*: generate `simulate`/`execute` and the runtime conversions. Disable it
-//!   to use the generated types only (for example to share the schema with a WASM prover), which
+//! - `runner` *(default)*: generate `simulate`/`execute` and the value conversions. Disable it to
+//!   use the generated types only (for example to share the schema with a WASM prover), which
 //!   avoids compiling the Noir execution crates.
-//! - `field`: use `acvm::FieldElement` for `Field` without enabling `runner`.
+//! - `field`: use Noir's `FieldElement` for `Field` without enabling `runner`.
 //! - `prove`: generate the proving functions described under [Proving](#proving). Implies
 //!   `runner`; needs the `bb` CLI at run time.
 //!
-//! # Noir version
+//! # Versions
 //!
-//! Artifacts must come from Noir [`NOIR_VERSION`]; check with `nargo --version`. `noi` reports a
-//! version mismatch when an artifact is first loaded.
+//! Artifacts must come from Noir [`NOIR_VERSION`] (`nargo --version`); `noi` rejects artifacts
+//! from other releases when they are first loaded, naming both versions.
 #![warn(missing_docs)]
 // Doc snippets show complete `build.rs` files, which need `fn main`.
 #![allow(clippy::needless_doctest_main)]
@@ -211,12 +236,12 @@
 pub use noi_core::prove::{self, Proof, Prover, VerifierTarget, BB_VERSION};
 #[cfg(feature = "runner")]
 pub use noi_core::runtime::{
-    self, Client, Execution, ExecutionError, FromOutputValue, InputMap, InputValue, Program,
-    ToInputValue,
+    self, Client, Execution, ExecutionError, FromValue, InputMap, OracleValue, Program, ToValue,
+    Value,
 };
 pub use noi_core::{
     export::{self, ExportFunction, Param, StructField, StructType, TypeRepr, Visibility},
-    load_export_dir,
+    load_export_dir, noir_version_compatible,
     types::FieldElement,
     NOIR_VERSION,
 };

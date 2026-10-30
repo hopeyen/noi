@@ -7,7 +7,7 @@ fn match_orders_executes() {
     let client = dark_pool::Client::new();
     let matched = dark_pool::match_orders::simulate(
         &client,
-        dark_pool::match_orders::Args {
+        &dark_pool::match_orders::Args {
             bid: dark_pool::Order {
                 price: 1_005,
                 size: 50,
@@ -28,7 +28,7 @@ fn settle_batch_executes() {
     let client = dark_pool::Client::new();
     let delta = dark_pool::settle_batch::simulate(
         &client,
-        dark_pool::settle_batch::Args {
+        &dark_pool::settle_batch::Args {
             filled: [12, 18, 10],
             reserve: 45,
         },

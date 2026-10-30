@@ -21,14 +21,11 @@ homepage = "https://github.com/hopeyen/noi"
 documentation = "https://docs.rs/noi"
 
 [workspace.dependencies]
-# Noir toolchain crates. Keep the tag in sync with `noi_core::NOIR_VERSION`, the README, and
-# `scripts/refresh_exports.sh`; artifacts are only decodable by the matching release.
-acvm = { git = "https://github.com/noir-lang/noir", tag = "v1.0.0-beta.26" }
-bn254_blackbox_solver = { git = "https://github.com/noir-lang/noir", tag = "v1.0.0-beta.26" }
-# `rpc` enables JSON-RPC oracle resolvers (`Client::with_oracle_resolver`).
-nargo = { git = "https://github.com/noir-lang/noir", tag = "v1.0.0-beta.26", features = ["rpc"] }
-noirc_abi = { git = "https://github.com/noir-lang/noir", tag = "v1.0.0-beta.26" }
-noirc_artifacts = { git = "https://github.com/noir-lang/noir", tag = "v1.0.0-beta.26" }
+# Noir execution crates, from crates.io. Keep the version in sync with `noi_core::NOIR_VERSION`,
+# `scripts/refresh_exports.sh`, and the README; artifacts are decoded with the matching release.
+acir_field = { version = "1.0.0", features = ["bn254"] }
+acvm = { version = "1.0.0", default-features = false, features = ["bn254"] }
+bn254_blackbox_solver = "1.0.0"
 anyhow = "1.0"
 heck = "0.5"
 "fs-err" = "2.11"
@@ -36,11 +33,7 @@ proc-macro2 = "1.0"
 quote = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 syn = { version = "2.0", features = ["full"] }
 tempfile = "3.10"
-
-[patch.crates-io]
-noi-core = { path = "crates/noi-core" }
-noi-build = { path = "crates/noi-build" }
-noi-macro = { path = "crates/noi-macro" }
-noi = { path = "crates/noi" }
+toml = "0.8"

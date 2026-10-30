@@ -322,28 +322,71 @@ pub fn load_export_file(path: impl AsRef<Path>) -> Result<ExportFunction> {
 /// Parses an artifact's JSON text. `source_path` is left empty.
 pub(crate) fn parse_export(name: &str, json: &str) -> Result<ExportFunction> {
     let raw: RawExport = serde_json::from_str(json)?;
-    let parameters = raw
-        .abi
-        .parameters
-        .into_iter()
-        .map(|p| Param {
-            name: p.name,
-            ty: p.ty.into(),
-            visibility: p.visibility,
+    Ok(raw.abi.into_function(name, raw.noir_version))
+}
+
+/// How the ABI describes the payload of a failed assertion (`noirc_abi::AbiErrorType`).
+#[cfg_attr(not(feature = "runner"), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ErrorType {
+    /// `assert(cond, "literal")`: the message is known statically.
+    String(String),
+    /// `assert(cond, f"... {x} ...")`: a format string of `length` bytes followed by the item count
+    /// and the items.
+    FmtString { length: usize, items: Vec<TypeRepr> },
+    /// `assert(cond, value)` with a non-string value.
+    Custom(TypeRepr),
+}
+
+/// The ABI as the runtime needs it: function signature plus error descriptors keyed by selector.
+#[cfg_attr(not(feature = "runner"), allow(dead_code))]
+pub(crate) struct ParsedAbi {
+    pub(crate) function: ExportFunction,
+    pub(crate) error_types: BTreeMap<u64, ErrorType>,
+}
+
+impl<'de> Deserialize<'de> for ParsedAbi {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawAbi::deserialize(deserializer)?;
+        let error_types = raw
+            .error_types
+            .iter()
+            .map(|(selector, ty)| {
+                let selector = selector.parse::<u64>().map_err(serde::de::Error::custom)?;
+                Ok((selector, ty.clone().into()))
+            })
+            .collect::<Result<_, D::Error>>()?;
+        Ok(ParsedAbi {
+            function: raw.into_function("", None),
+            error_types,
         })
-        .collect();
-    let (return_type, return_visibility) = match raw.abi.return_type {
-        Some(ret) => (Some(ret.abi_type.into()), ret.visibility),
-        None => (None, Visibility::Private),
-    };
-    Ok(ExportFunction {
-        name: name.to_owned(),
-        parameters,
-        return_type,
-        return_visibility,
-        noir_version: raw.noir_version,
-        source_path: PathBuf::new(),
-    })
+    }
+}
+
+impl RawAbi {
+    fn into_function(self, name: &str, noir_version: Option<String>) -> ExportFunction {
+        let parameters = self
+            .parameters
+            .into_iter()
+            .map(|p| Param {
+                name: p.name,
+                ty: p.ty.into(),
+                visibility: p.visibility,
+            })
+            .collect();
+        let (return_type, return_visibility) = match self.return_type {
+            Some(ret) => (Some(ret.abi_type.into()), ret.visibility),
+            None => (None, Visibility::Private),
+        };
+        ExportFunction {
+            name: name.to_owned(),
+            parameters,
+            return_type,
+            return_visibility,
+            noir_version,
+            source_path: PathBuf::new(),
+        }
+    }
 }
 
 // Serde mirrors of `noirc_abi` types. Kept private and decoupled from the Noir crates so the macro
@@ -363,6 +406,38 @@ struct RawAbi {
     parameters: Vec<RawParam>,
     #[serde(default)]
     return_type: Option<RawReturn>,
+    /// Keyed by the error selector, a `u64` serialized as a decimal string.
+    #[cfg_attr(not(feature = "runner"), allow(dead_code))]
+    #[serde(default)]
+    error_types: BTreeMap<String, RawErrorType>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "error_kind", rename_all = "lowercase")]
+enum RawErrorType {
+    String {
+        string: String,
+    },
+    #[serde(rename = "fmtstring")]
+    FmtString {
+        length: usize,
+        item_types: Vec<RawType>,
+    },
+    // `Custom(AbiType)` is internally tagged, so the type's own fields sit next to `error_kind`.
+    Custom(RawType),
+}
+
+impl From<RawErrorType> for ErrorType {
+    fn from(raw: RawErrorType) -> Self {
+        match raw {
+            RawErrorType::String { string } => ErrorType::String(string),
+            RawErrorType::FmtString { length, item_types } => ErrorType::FmtString {
+                length,
+                items: item_types.into_iter().map(Into::into).collect(),
+            },
+            RawErrorType::Custom(ty) => ErrorType::Custom(ty.into()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -381,7 +456,7 @@ struct RawReturn {
     visibility: Visibility,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum RawType {
     Field,
@@ -407,14 +482,14 @@ enum RawType {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RawSign {
     Unsigned,
     Signed,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct RawStructField {
     name: String,
     #[serde(rename = "type")]
@@ -453,14 +528,16 @@ impl From<RawType> for TypeRepr {
     }
 }
 
-/// Groups every distinct struct reachable from `functions` by Noir path.
+/// Every distinct struct reachable from `functions`, in a deterministic order.
 ///
-/// Useful for code generators that need to emit one Rust type per Noir struct. Returns an error if
-/// the same path appears with two different layouts (which indicates mixed artifacts from
-/// different compilations).
-pub fn collect_structs(functions: &[ExportFunction]) -> Result<BTreeMap<&str, &StructType>> {
-    let mut out: BTreeMap<&str, &StructType> = BTreeMap::new();
-    let mut conflict = None;
+/// Code generators need one Rust type per Noir struct *instantiation*: the ABI names a struct by
+/// its path only, without generic arguments, so `Option<u8>` and `Option<u32>` share the path
+/// `std::option::Option` but have different fields. Structs are therefore distinct by path **and**
+/// layout. The result is sorted by path, and instantiations of the same path keep the order in
+/// which they are first reached (functions are visited in name order, parameters before the
+/// return type, outer types before inner ones).
+pub fn collect_structs(functions: &[ExportFunction]) -> Vec<&StructType> {
+    let mut seen: Vec<&StructType> = Vec::new();
     for function in functions {
         let types = function
             .parameters
@@ -468,24 +545,16 @@ pub fn collect_structs(functions: &[ExportFunction]) -> Result<BTreeMap<&str, &S
             .map(|p| &p.ty)
             .chain(function.return_type.as_ref());
         for ty in types {
-            ty.visit_structs(&mut |st| match out.get(st.path.as_str()) {
-                Some(existing) if *existing != st => {
-                    conflict.get_or_insert_with(|| st.path.clone());
-                }
-                Some(_) => {}
-                None => {
-                    out.insert(&st.path, st);
+            ty.visit_structs(&mut |st| {
+                if !seen.contains(&st) {
+                    seen.push(st);
                 }
             });
         }
     }
-    if let Some(path) = conflict {
-        bail!(
-            "struct `{path}` has different field layouts across export artifacts; re-run \
-             `nargo export` so all artifacts come from the same compilation"
-        );
-    }
-    Ok(out)
+    // Stable sort: instantiations of one path stay in first-seen order.
+    seen.sort_by(|a, b| a.path.cmp(&b.path));
+    seen
 }
 
 #[cfg(test)]

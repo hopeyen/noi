@@ -1,0 +1,23 @@
+{
+  "noir_version": "1.0.0",
+  "abi": {
+    "parameters": [
+      {"name": "a", "type": {"kind": "struct", "path": "std::option::Option", "fields": [
+        {"name": "_is_some", "type": {"kind": "boolean"}},
+        {"name": "_value", "type": {"kind": "integer", "sign": "unsigned", "width": 8}}]}, "visibility": "private"},
+      {"name": "b", "type": {"kind": "struct", "path": "std::option::Option", "fields": [
+        {"name": "_is_some", "type": {"kind": "boolean"}},
+        {"name": "_value", "type": {"kind": "integer", "sign": "unsigned", "width": 32}}]}, "visibility": "private"},
+      {"name": "c", "type": {"kind": "struct", "path": "lib::Client", "fields": [
+        {"name": "id", "type": {"kind": "field"}}]}, "visibility": "private"},
+      {"name": "wide", "type": {"kind": "tuple", "fields": [
+        {"kind": "boolean"}, {"kind": "boolean"}, {"kind": "boolean"}, {"kind": "boolean"},
+        {"kind": "boolean"}, {"kind": "boolean"}, {"kind": "boolean"}, {"kind": "boolean"},
+        {"kind": "boolean"}, {"kind": "boolean"}, {"kind": "boolean"}, {"kind": "boolean"}]}, "visibility": "private"}
+    ],
+    "return_type": {"abi_type": {"kind": "struct", "path": "std::option::Option", "fields": [
+        {"name": "_is_some", "type": {"kind": "boolean"}},
+        {"name": "_value", "type": {"kind": "integer", "sign": "unsigned", "width": 8}}]}, "visibility": "private"},
+    "error_types": {}
+  }
+}

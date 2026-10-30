@@ -2,12 +2,13 @@
 
 /// An element of the BN254 scalar field, the type of Noir's `Field`.
 ///
-/// With the `runner` or `field` feature this is `acvm::FieldElement`, which supports arithmetic
+/// With the `runner` or `field` feature this is Noir's `acir_field::FieldElement` (the same type
+/// `acvm` re-exports), which supports arithmetic
 /// and conversions (`FieldElement::from(42u128)`, `FieldElement::try_from_str("0x2a")`).
 /// Without either feature it is a lightweight placeholder holding the decimal or hex string, so
 /// generated types still compile in schema-only builds.
 #[cfg(any(feature = "runner", feature = "field"))]
-pub use acvm::FieldElement;
+pub use acir_field::FieldElement;
 
 /// Placeholder for Noir's `Field` when neither `runner` nor `field` is enabled.
 ///
