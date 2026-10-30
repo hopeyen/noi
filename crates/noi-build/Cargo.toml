@@ -11,7 +11,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/noi-build"
 readme = "README.md"
 keywords = ["noir", "zk", "bindings"]
-categories = ["development-tools::build-utilities", "cryptography"]
+categories = ["development-tools::build-utils", "cryptography"]
 
 [dependencies]
 anyhow.workspace = true
