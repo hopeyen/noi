@@ -20,7 +20,7 @@ all-features = true
 [features]
 default = ["runner"]
 runner = ["field", "dep:acvm", "dep:bn254_blackbox_solver"]
-prove = ["runner", "dep:sha2", "dep:tempfile"]
+prove = ["runner", "dep:libc", "dep:sha2", "dep:tempfile"]
 field = ["dep:acir_field"]
 
 [dependencies]
@@ -33,6 +33,10 @@ acvm = { workspace = true, optional = true }
 bn254_blackbox_solver = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# `geteuid` for the verification-key cache ownership check (feature `prove`).
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

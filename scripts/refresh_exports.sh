@@ -103,7 +103,12 @@ for path in sys.argv[2:]:
     with open(path) as f:
         artifact = json.load(f)
     for entry in artifact.get("file_map", {}).values():
-        src = os.path.realpath(entry.get("path", ""))
+        src = entry.get("path", "")
+        # Only nargo's absolute source paths are machine-specific; embedded stdlib entries are
+        # already relative (`std/lib.nr`) and must not be resolved against the caller's cwd.
+        if not os.path.isabs(src):
+            continue
+        src = os.path.realpath(src)
         if src.startswith(root + os.sep):
             entry["path"] = os.path.relpath(src, root)
     with open(path, "w") as f:
@@ -112,6 +117,7 @@ PY
 }
 
 main() {
+  cd "${ROOT_DIR}"
   ensure_nargo
   "${NARGO_BIN}" --version
 

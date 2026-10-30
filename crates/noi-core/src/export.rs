@@ -36,7 +36,8 @@ use serde::Deserialize;
 /// ABI metadata for a single Noir `#[export]` function.
 ///
 /// Produced by [`load_export_dir`] / [`load_export_file`]. The `nrg!` macro turns each value into a
-/// Rust module with typed `Args`, `Inputs`, `Output`, and `simulate`.
+/// Rust module with `NAME`, `SIGNATURE`, typed `Args` and `Output`, `program`/`execute`/`simulate`
+/// (feature `runner`), and `prove`/`verify` helpers (feature `prove`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExportFunction {
@@ -327,7 +328,64 @@ pub fn load_export_file(path: impl AsRef<Path>) -> Result<ExportFunction> {
 /// Parses an artifact's JSON text. `source_path` is left empty.
 pub(crate) fn parse_export(name: &str, json: &str) -> Result<ExportFunction> {
     let raw: RawExport = serde_json::from_str(json)?;
-    Ok(raw.abi.into_function(name, raw.noir_version))
+    let function = raw.abi.into_function(name, raw.noir_version);
+    validate(&function)?;
+    Ok(function)
+}
+
+/// Rejects ABIs no Noir compiler produces, so later arithmetic on them cannot overflow or panic:
+/// integer widths outside Noir's set, and encodings of more than `u32::MAX` field elements (Noir
+/// uses `u32` lengths and witness indices).
+fn validate(function: &ExportFunction) -> Result<()> {
+    let mut total: u64 = 0;
+    for ty in function
+        .parameters
+        .iter()
+        .map(|p| &p.ty)
+        .chain(&function.return_type)
+    {
+        total = total
+            .checked_add(checked_field_count(ty)?)
+            .filter(|t| *t <= u64::from(u32::MAX))
+            .ok_or_else(|| {
+                anyhow!(
+                    "the ABI of `{}` encodes too many field elements",
+                    function.name
+                )
+            })?;
+    }
+    Ok(())
+}
+
+/// Number of field elements `ty` occupies once encoded, or an error if it is not a valid Noir type
+/// or exceeds `u32::MAX`.
+pub(crate) fn checked_field_count(ty: &TypeRepr) -> Result<u64> {
+    let limit = |n: Option<u64>| {
+        n.filter(|n| *n <= u64::from(u32::MAX))
+            .ok_or_else(|| anyhow!("type `{ty}` encodes too many field elements"))
+    };
+    match ty {
+        TypeRepr::Bool | TypeRepr::Field => Ok(1),
+        TypeRepr::Unsigned(1 | 8 | 16 | 32 | 64 | 128)
+        | TypeRepr::Signed(8 | 16 | 32 | 64 | 128) => Ok(1),
+        TypeRepr::Unsigned(_) | TypeRepr::Signed(_) => bail!("`{ty}` is not a Noir integer type"),
+        TypeRepr::String(len) => limit(Some(*len as u64)),
+        TypeRepr::Array(inner, len) => limit(checked_field_count(inner)?.checked_mul(*len as u64)),
+        TypeRepr::Tuple(items) => {
+            let mut sum = Some(0u64);
+            for item in items {
+                sum = sum.and_then(|s| s.checked_add(checked_field_count(item).ok()?));
+            }
+            limit(sum)
+        }
+        TypeRepr::Struct(st) => {
+            let mut sum = Some(0u64);
+            for field in &st.fields {
+                sum = sum.and_then(|s| s.checked_add(checked_field_count(&field.ty).ok()?));
+            }
+            limit(sum)
+        }
+    }
 }
 
 /// How the ABI describes the payload of a failed assertion (`noirc_abi::AbiErrorType`).
@@ -358,11 +416,22 @@ impl<'de> Deserialize<'de> for ParsedAbi {
             .iter()
             .map(|(selector, ty)| {
                 let selector = selector.parse::<u64>().map_err(serde::de::Error::custom)?;
-                Ok((selector, ty.clone().into()))
+                let ty: ErrorType = ty.clone().into();
+                let types: Vec<&TypeRepr> = match &ty {
+                    ErrorType::String(_) => Vec::new(),
+                    ErrorType::FmtString { items, .. } => items.iter().collect(),
+                    ErrorType::Custom(t) => vec![t],
+                };
+                for t in types {
+                    checked_field_count(t).map_err(serde::de::Error::custom)?;
+                }
+                Ok((selector, ty))
             })
             .collect::<Result<_, D::Error>>()?;
+        let function = raw.into_function("", None);
+        validate(&function).map_err(serde::de::Error::custom)?;
         Ok(ParsedAbi {
-            function: raw.into_function("", None),
+            function,
             error_types,
         })
     }
@@ -417,6 +486,8 @@ struct RawAbi {
     error_types: BTreeMap<String, RawErrorType>,
 }
 
+// Read only by `From<RawErrorType> for ErrorType`, which only `runner` code reaches.
+#[cfg_attr(not(feature = "runner"), allow(dead_code))]
 #[derive(Clone, Deserialize)]
 #[serde(tag = "error_kind", rename_all = "lowercase")]
 enum RawErrorType {

@@ -301,6 +301,12 @@ impl Program {
         self.hash
     }
 
+    /// Number of ACIR circuits in the program (more than one when it calls `#[fold]` functions).
+    #[cfg_attr(not(feature = "prove"), allow(dead_code))]
+    pub(crate) fn circuit_count(&self) -> usize {
+        self.bytecode.functions.len()
+    }
+
     /// The artifact's original JSON text (the format `bb` and `nargo` read).
     pub fn artifact_json(&self) -> &str {
         &self.json

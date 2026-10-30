@@ -82,3 +82,9 @@ fn order_total(item: Field, qty: u32) -> Field {
     let price = unsafe { get_price(item) };
     price * (qty as Field)
 }
+
+/// Indexes an array of structs; an out-of-range `i` fails with the array's own size and index.
+#[export]
+fn pick(i: u32, points: [P; 2]) -> u32 {
+    points[i].y
+}

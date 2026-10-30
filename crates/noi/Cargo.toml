@@ -20,11 +20,11 @@ all-features = true
 [features]
 default = ["runner"]
 # Execute exports from Rust (`simulate`/`execute`). Pulls in the Noir execution crates.
-runner = ["noi-core/runner", "noi-macro/runner"]
+runner = ["noi-core/runner"]
 # Generate `prove`/`verify`/`verification_key`, backed by Barretenberg's `bb` CLI. Implies `runner`.
-prove = ["runner", "noi-core/prove", "noi-macro/prove"]
+prove = ["runner", "noi-core/prove"]
 # Use `acvm::FieldElement` for Noir `Field` values without enabling `runner`.
-field = ["noi-core/field", "noi-macro/field"]
+field = ["noi-core/field"]
 
 [dependencies]
 anyhow.workspace = true

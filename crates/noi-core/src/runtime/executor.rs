@@ -114,7 +114,10 @@ impl Executor<'_> {
 
     fn failure(&self, error: OpcodeResolutionError<FieldElement>) -> Failure {
         let payload = match &error {
+            // Like nargo's `execution_error_from`: out-of-bounds accesses into flattened arrays of
+            // structs/tuples carry a payload stating the error in the program's own coordinates.
             OpcodeResolutionError::UnsatisfiedConstrain { payload, .. }
+            | OpcodeResolutionError::IndexOutOfBounds { payload, .. }
             | OpcodeResolutionError::BrilligFunctionFailed { payload, .. } => payload.as_ref(),
             _ => None,
         };
@@ -169,43 +172,73 @@ fn resolve_payload(
     }
 }
 
-/// Replaces each `{...}` placeholder of a Noir format string with the next value, in order.
+/// Renders a Noir format string, replacing each `{...}` placeholder with the next value in order.
+///
+/// A port of `noirc_printable_type::write_template_replacing_interpolations`: `{{` and `}}` are
+/// escapes for literal braces and consume no value; the name inside a placeholder is ignored.
 fn fill_placeholders(template: &str, values: &[String]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut values = values.iter();
-    let mut chars = template.chars();
+    let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '{' {
-            // Skip the placeholder name; Noir substitutes items positionally.
-            for c in chars.by_ref() {
-                if c == '}' {
-                    break;
+        match c {
+            '}' => {
+                // Outside a placeholder, `}` only appears escaped as `}}`.
+                if chars.peek() == Some(&'}') {
+                    chars.next();
                 }
+                out.push('}');
             }
-            out.push_str(values.next().map_or("{}", String::as_str));
-        } else {
-            out.push(c);
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                out.push('{');
+            }
+            '{' => {
+                for c in chars.by_ref() {
+                    if c == '}' {
+                        break;
+                    }
+                }
+                out.push_str(values.next().map_or("{}", String::as_str));
+            }
+            c => out.push(c),
         }
     }
     out
 }
 
-/// Formats a decoded value roughly the way Noir's `println` does.
+/// Formats a decoded value exactly as Noir's `println` and nargo's error messages do
+/// (`noirc_printable_type::to_string`).
 pub(crate) fn display_value(value: &Value, ty: &TypeRepr) -> String {
+    let to_u128 = |f: &FieldElement| f.to_u128();
     match (value, ty) {
-        (Value::Field(f), TypeRepr::Bool) => (!f.is_zero()).to_string(),
-        (Value::Field(f), TypeRepr::Unsigned(_)) => f
-            .try_into_u128()
-            .map_or_else(|| f.to_string(), |v| v.to_string()),
-        (Value::Field(f), TypeRepr::Signed(width)) => match f.try_into_u128() {
-            Some(raw) if *width < 128 && raw >> (width - 1) == 1 => {
-                // Two's complement at `width` bits.
-                (raw as i128 - (1i128 << width)).to_string()
+        (Value::Field(f), TypeRepr::Bool) => f.is_one().to_string(),
+        (Value::Field(f), TypeRepr::Unsigned(width)) => {
+            let mut v = to_u128(f);
+            if *width < 128 {
+                v &= (1u128 << width) - 1;
             }
-            Some(raw) => raw.to_string(),
-            None => f.to_string(),
-        },
-        (Value::Field(f), _) => format!("0x{}", f.to_hex()),
+            v.to_string()
+        }
+        (Value::Field(f), TypeRepr::Signed(width)) => {
+            let width = u32::from(*width).clamp(1, 128);
+            let mut v = to_u128(f);
+            if width < 128 {
+                v &= (1u128 << width) - 1;
+            }
+            if v >> (width - 1) == 1 {
+                // Two's complement at `width` bits.
+                let magnitude = if width == 128 {
+                    v.wrapping_neg()
+                } else {
+                    (v ^ ((1u128 << width) - 1)) + 1
+                };
+                format!("-{magnitude}")
+            } else {
+                v.to_string()
+            }
+        }
+        (Value::Field(f), _) => f.to_short_hex(),
         (Value::String(s), _) => s.clone(),
         (Value::Array(items), TypeRepr::Array(inner, _)) => format!(
             "[{}]",
@@ -215,15 +248,19 @@ pub(crate) fn display_value(value: &Value, ty: &TypeRepr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        (Value::Array(items), TypeRepr::Tuple(types)) => format!(
-            "({})",
-            items
+        (Value::Array(items), TypeRepr::Tuple(types)) => {
+            let inner = items
                 .iter()
                 .zip(types)
                 .map(|(v, t)| display_value(v, t))
                 .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .join(", ");
+            if types.len() == 1 {
+                format!("({inner},)")
+            } else {
+                format!("({inner})")
+            }
+        }
         (Value::Struct(map), TypeRepr::Struct(st)) => format!(
             "{} {{ {} }}",
             st.short_name(),
@@ -260,17 +297,62 @@ impl OracleValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::{StructField, StructType};
 
-    #[test]
-    fn placeholders_are_filled_in_order() {
-        let out = fill_placeholders("x={x}, y={y}, z={z}", &["1".into(), "2".into()]);
-        assert_eq!(out, "x=1, y=2, z={}");
+    fn f(v: u128) -> Value {
+        Value::Field(FieldElement::from(v))
     }
 
     #[test]
-    fn signed_values_display_negative() {
-        let v = Value::Field(FieldElement::from(u128::from(u8::MAX)));
-        assert_eq!(display_value(&v, &TypeRepr::Signed(8)), "-1");
-        assert_eq!(display_value(&v, &TypeRepr::Unsigned(8)), "255");
+    fn placeholders_follow_noir_escaping() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            fill_placeholders("x={x}, y={y}, z={z}", &v(&["1", "2"])),
+            "x=1, y=2, z={}"
+        );
+        // Expected strings are what nargo 1.0.0 prints for the same assertions.
+        assert_eq!(
+            fill_placeholders("esc {{literal}} then {a}", &v(&["200"])),
+            "esc {literal} then 200"
+        );
+        assert_eq!(
+            fill_placeholders("n={n} and {{}}", &v(&["3"])),
+            "n=3 and {}"
+        );
+        assert_eq!(fill_placeholders("x}}y {s}", &v(&["-7"])), "x}y -7");
+    }
+
+    #[test]
+    fn values_display_like_nargo() {
+        let max_u8 = f(u128::from(u8::MAX));
+        assert_eq!(display_value(&max_u8, &TypeRepr::Signed(8)), "-1");
+        assert_eq!(display_value(&max_u8, &TypeRepr::Unsigned(8)), "255");
+        assert_eq!(display_value(&f(0x80), &TypeRepr::Signed(8)), "-128");
+        assert_eq!(display_value(&f(5), &TypeRepr::Field), "0x05");
+        assert_eq!(display_value(&f(0), &TypeRepr::Field), "0x00");
+        assert_eq!(display_value(&f(1), &TypeRepr::Bool), "true");
+        let one = TypeRepr::Tuple(vec![TypeRepr::Unsigned(8)]);
+        assert_eq!(display_value(&Value::Array(vec![f(9)]), &one), "(9,)");
+        let st = TypeRepr::Struct(StructType {
+            path: "m::P".into(),
+            fields: vec![
+                StructField {
+                    name: "x".into(),
+                    ty: TypeRepr::Field,
+                },
+                StructField {
+                    name: "y".into(),
+                    ty: TypeRepr::Signed(8),
+                },
+            ],
+        });
+        let p = Value::Struct(BTreeMap::from([
+            ("x".to_string(), f(0x1234)),
+            ("y".to_string(), f(0x80)),
+        ]));
+        assert_eq!(display_value(&p, &st), "P { x: 0x1234, y: -128 }");
+        // Malformed widths from an artifact must not panic.
+        assert_eq!(display_value(&f(1), &TypeRepr::Signed(0)), "-1");
+        assert_eq!(display_value(&max_u8, &TypeRepr::Unsigned(300)), "255");
     }
 }

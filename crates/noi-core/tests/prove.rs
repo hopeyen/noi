@@ -163,3 +163,29 @@ fn wrong_bb_release_is_refused() {
         .verification_key(&program)
         .is_ok());
 }
+
+#[test]
+fn nul_terminated_json_public_inputs_are_rejected() {
+    let Some((prover, program, _cache)) = setup() else {
+        return;
+    };
+    let honest = prove(&prover, &program, 10, 42);
+    // bb reads a file whose first non-space byte is `{` as JSON and its parser stops at NUL, so
+    // the bytes after the NUL are ignored by bb but decoded by `Proof::return_value`. Pad so every
+    // 32-byte chunk starts below the modulus' top byte and passes the canonical-field check.
+    let json = br#"{"public_inputs":["0x0a","0x01"]}"#;
+    let mut forged = vec![b' '; 2];
+    forged.extend_from_slice(json);
+    forged.push(0);
+    while !forged.len().is_multiple_of(32) {
+        forged.push(0);
+    }
+    // A second chunk that would decode as a different statement.
+    forged.extend_from_slice(&[0u8; 32]);
+    forged.truncate(64);
+    let proof = Proof::from_parts(honest.proof.clone(), forged, VerifierTarget::Default);
+    assert!(
+        !prover.verify(&program, &proof).unwrap(),
+        "NUL-terminated JSON must not reach bb"
+    );
+}

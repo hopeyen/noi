@@ -1,7 +1,7 @@
 //! Conversions between Rust values and [`Value`].
 
 use acvm::{AcirField, FieldElement};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 
 use super::Value;
 
@@ -140,7 +140,8 @@ impl FromValue for String {
                     .into_iter()
                     .map(u8::from_value)
                     .collect::<Result<Vec<_>>>()?;
-                String::from_utf8(bytes).context("Noir string is not valid UTF-8")
+                // Noir strings may hold arbitrary bytes; decode lossily, as nargo does.
+                Ok(String::from_utf8_lossy(&bytes).into_owned())
             }
             other => Err(anyhow!("expected a string, got {other:?}")),
         }

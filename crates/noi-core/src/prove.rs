@@ -24,9 +24,14 @@
 //!
 //! **The cache is trusted.** `verify` accepts any proof that checks out against the cached key,
 //! so whoever can write the cache can make forged proofs verify. The default location is
-//! per-user, it is created with mode `0700`, and on Unix `noi` refuses to use a cache directory
-//! that is not owned by the current user or is writable by group or others. Do not point
-//! `NOI_CACHE_DIR` at a shared directory.
+//! per-user. On Unix it is created with mode `0700`, and `noi` refuses a cache directory that is
+//! not owned by the current user or is writable by group or others; other platforms get no such
+//! check. Never point `NOI_CACHE_DIR` at a shared directory.
+//!
+//! # Limitations
+//!
+//! bb's UltraHonk prover only accepts single-circuit programs, so functions that call `#[fold]`
+//! functions can be simulated but not proved; the prover reports this before invoking `bb`.
 //!
 //! `bb` must be release [`BB_VERSION`], the one paired with [`crate::NOIR_VERSION`]; the prover
 //! checks `bb --version` once and refuses other releases unless
@@ -70,7 +75,7 @@ use std::{
 };
 
 use acvm::AcirField;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use fs_err as fs;
 use sha2::{Digest, Sha256};
 
@@ -199,14 +204,15 @@ impl fmt::Debug for Proof {
 
 /// Splits `bytes` into canonical 32-byte big-endian field elements.
 fn decode_canonical_fields(bytes: &[u8], what: &str) -> Result<Vec<FieldElement>> {
-    if bytes.len() % 32 != 0 {
+    let (chunks, rest) = bytes.as_chunks::<32>();
+    if !rest.is_empty() {
         bail!(
             "{what} are {} bytes, expected a multiple of 32",
             bytes.len()
         );
     }
-    bytes
-        .chunks_exact(32)
+    chunks
+        .iter()
         .enumerate()
         .map(|(i, chunk)| {
             let field = FieldElement::from_be_bytes_reduce(chunk);
@@ -232,7 +238,7 @@ pub struct Prover {
     crs_path: Option<PathBuf>,
     cache_dir: PathBuf,
     any_bb_version: bool,
-    bb_version: Arc<OnceLock<Result<String, String>>>,
+    bb_version: Arc<OnceLock<String>>,
 }
 
 impl fmt::Debug for Prover {
@@ -376,22 +382,44 @@ impl Prover {
                 self.target
             );
         }
-        if !is_canonical_binary(&proof.proof, "proof")
-            || !is_canonical_binary(&proof.public_inputs, "public inputs")
-        {
+        // Decode the statement exactly as `Proof::return_value` does; anything that is not the
+        // right number of canonical field elements is an invalid proof.
+        let Ok(public_inputs) = proof.public_inputs() else {
+            return Ok(false);
+        };
+        let expected = program
+            .function()
+            .return_type
+            .as_ref()
+            .map_or(0, abi::field_count);
+        let (proof_words, rest) = proof.proof.as_chunks::<32>();
+        if public_inputs.len() != expected || !rest.is_empty() || proof_words.is_empty() {
             return Ok(false);
         }
         // Read the key first so a missing or unreadable cache entry is an error, not "invalid".
         let vk = read_vk(&self.vk_path(program)?)?;
 
+        // `bb` reads a file as JSON when its first non-space byte is `{` (and stops at a NUL), so
+        // passing the caller's raw bytes could make it check a different statement than the one
+        // decoded above. Always hand it explicit JSON built from the decoded values instead.
+        let hex = |word: &[u8]| {
+            let digits: String = word.iter().map(|b| format!("{b:02x}")).collect();
+            serde_json::Value::String(format!("0x{digits}"))
+        };
+        let proof_json =
+            serde_json::json!({ "proof": proof_words.iter().map(|w| hex(w)).collect::<Vec<_>>() });
+        let inputs_json = serde_json::json!({
+            "public_inputs": public_inputs.iter().map(|f| hex(&f.to_be_bytes())).collect::<Vec<_>>()
+        });
+
         let work = tempfile::tempdir().context("creating a temporary directory for bb")?;
         let (proof_path, inputs_path, vk_path) = (
-            work.path().join("proof"),
-            work.path().join("public_inputs"),
+            work.path().join("proof.json"),
+            work.path().join("public_inputs.json"),
             work.path().join("vk"),
         );
-        fs::write(&proof_path, &proof.proof)?;
-        fs::write(&inputs_path, &proof.public_inputs)?;
+        fs::write(&proof_path, proof_json.to_string())?;
+        fs::write(&inputs_path, inputs_json.to_string())?;
         fs::write(&vk_path, vk)?;
 
         let output = self.run(
@@ -435,20 +463,24 @@ impl Prover {
         Ok(fs::read_to_string(out)?)
     }
 
-    /// Checks `bb --version` once per prover (shared by clones).
+    /// Checks `bb --version`. A successful answer is cached for this prover and its clones; a
+    /// failure (e.g. `bb` not installed yet) is retried on the next call.
     fn checked_bb_version(&self) -> Result<&str> {
-        let version = self.bb_version.get_or_init(|| {
-            let output = Command::new(&self.bb)
-                .arg("--version")
-                .output()
-                .map_err(|err| format!("{}: {err}", self.missing_bb_hint()))?;
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !output.status.success() || version.is_empty() {
-                return Err(format!("`{} --version` failed", self.bb.display()));
+        let version = match self.bb_version.get() {
+            Some(version) => version.as_str(),
+            None => {
+                let output = Command::new(&self.bb)
+                    .arg("--version")
+                    .output()
+                    .with_context(|| self.missing_bb_hint())?;
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if !output.status.success() || version.is_empty() {
+                    bail!("`{} --version` failed", self.bb.display());
+                }
+                // A concurrent caller may have stored it first; both ran the same binary.
+                self.bb_version.get_or_init(|| version).as_str()
             }
-            Ok(version)
-        });
-        let version = version.as_deref().map_err(|err| anyhow!("{err}"))?;
+        };
         if !self.any_bb_version && version != BB_VERSION {
             bail!(
                 "`{}` is bb {version}, but noi requires bb {BB_VERSION} (paired with Noir {}); \
@@ -463,6 +495,15 @@ impl Prover {
 
     /// Path of the cached verification key, computing it if needed.
     fn vk_path(&self, program: &Program) -> Result<PathBuf> {
+        let circuits = program.circuit_count();
+        if circuits > 1 {
+            bail!(
+                "`{}` compiles to {circuits} ACIR circuits because it calls `#[fold]` functions; \
+                 bb {BB_VERSION}'s UltraHonk prover only supports single-circuit programs \
+                 (remove `#[fold]` to prove it)",
+                program.name()
+            );
+        }
         let bb_version = self.checked_bb_version()?;
         // Key on the exact artifact bytes (not the self-reported `hash`, which does not cover
         // codegen), the target, and the bb release. The name is only a readable, sanitized prefix.
@@ -569,29 +610,19 @@ fn bb_messages(output: &Output) -> String {
         .join("; ")
 }
 
-/// Interprets `bb verify -v`. bb 6 exits 1 both for a rejected proof and for errors such as a
-/// malformed key; it prints `Proof verification failed: <reason>` only in the latter case.
+/// Interprets `bb verify -v`. bb 6 exits 1 for a rejected proof (`verified: 0`, sometimes with
+/// `Proof verification failed: invalid proof size …`) and also for tooling errors such as a
+/// malformed key (`Proof verification failed: invalid VK size …`); only the former means invalid.
 fn classify_verify(output: &Output) -> Result<bool> {
     let messages = bb_messages(output);
+    let tooling_error = messages.split("; ").any(|line| {
+        line.starts_with("Proof verification failed:") && !line.contains("invalid proof size")
+    });
     match output.status.code() {
         Some(0) if messages.contains("verified: 1") => Ok(true),
-        Some(1)
-            if messages.contains("verified: 0")
-                && !messages.contains("Proof verification failed:") =>
-        {
-            Ok(false)
-        }
+        Some(1) if messages.contains("verified: 0") && !tooling_error => Ok(false),
         _ => bail!("`bb verify` failed with {}: {messages}", output.status),
     }
-}
-
-/// Whether `bytes` are canonical field elements that `bb` will read as binary.
-///
-/// `bb` parses any input that is valid JSON as JSON, so a crafted file could make `bb` check a
-/// different statement than [`Proof::return_value`] decodes.
-fn is_canonical_binary(bytes: &[u8], what: &str) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes).is_err()
-        && decode_canonical_fields(bytes, what).is_ok()
 }
 
 fn read_vk(path: &Path) -> Result<Vec<u8>> {
@@ -639,7 +670,8 @@ fn default_cache_dir() -> PathBuf {
 
 /// Creates `dir` (mode `0700` on Unix) and, on Unix, rejects it unless it is owned by the current
 /// user and not writable by group or others. Otherwise another local user could plant a
-/// verification key that makes forged proofs verify.
+/// verification key that makes forged proofs verify. Other platforms are not checked; keep
+/// `NOI_CACHE_DIR` in a per-user location there.
 fn ensure_private_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -652,10 +684,9 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
             .with_context(|| format!("creating the noi cache at {}", dir.display()))?;
         // `symlink_metadata`: a symlink planted in place of the cache must not redirect it.
         let meta = fs::symlink_metadata(dir)?;
-        // std has no `getuid`; a file we just created carries our effective uid.
-        let probe = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("the noi cache at {} is not writable", dir.display()))?;
-        let our_uid = probe.as_file().metadata()?.uid();
+        // SAFETY: `geteuid` has no preconditions and cannot fail. Reading the uid this way (rather
+        // than creating a probe file) keeps a read-only, pre-populated cache usable.
+        let our_uid = unsafe { libc::geteuid() };
         if !meta.is_dir() || meta.uid() != our_uid || meta.mode() & 0o022 != 0 {
             bail!(
                 "refusing to use the noi cache at {}: it must be a directory owned by the current \
@@ -702,18 +733,22 @@ mod tests {
     }
 
     #[test]
-    fn non_canonical_or_json_inputs_are_rejected() {
+    fn non_canonical_inputs_are_rejected() {
         let misaligned = Proof::from_parts(vec![], vec![0; 33], VerifierTarget::Default);
         assert!(misaligned.public_inputs().is_err());
         let above_modulus = Proof::from_parts(vec![], vec![0xff; 32], VerifierTarget::Default);
         assert!(above_modulus.public_inputs().is_err());
+    }
 
-        // Valid JSON padded to a multiple of 32 bytes with leading spaces: every chunk starts
-        // with a byte below the modulus' top byte, so only the JSON check catches it.
-        let json = br#"{"public_inputs":["0x0a","0x01"]}"#;
-        let mut padded = vec![b' '; 64 - json.len()];
-        padded.extend_from_slice(json);
-        assert!(!is_canonical_binary(&padded, "public inputs"));
+    #[test]
+    fn folded_programs_are_refused_before_running_bb() {
+        let prover = Prover::new()
+            .with_bb("/definitely/not/bb")
+            .with_cache_dir(tempfile::tempdir().unwrap().path());
+        let err = prover
+            .verification_key(&fixture("sum_of_squares"))
+            .unwrap_err();
+        assert!(err.to_string().contains("single-circuit"), "{err}");
     }
 
     #[test]
@@ -734,6 +769,11 @@ mod tests {
         };
         assert!(classify_verify(&out(0, "verified: 1 (mem: 1 MiB)")).unwrap());
         assert!(!classify_verify(&out(1, "Proof verification failed\nverified: 0")).unwrap());
+        assert!(!classify_verify(&out(
+            1,
+            "verified: 0\nProof verification failed: invalid proof size. Expected 457, got 3"
+        ))
+        .unwrap());
         assert!(classify_verify(&out(
             1,
             "verified: 0\nProof verification failed: invalid VK size. Expected 3680 bytes, got 100"

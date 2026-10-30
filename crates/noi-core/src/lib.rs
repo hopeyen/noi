@@ -29,9 +29,10 @@
 //!
 //! # Features
 //!
-//! - `runner` *(default)*: enables [`runtime`], pulling in `acvm`, `nargo`, and `noirc_abi` at
-//!   Noir [`NOIR_VERSION`].
-//! - `field`: exposes `acvm::FieldElement` as [`types::FieldElement`] without the full runtime.
+//! - `runner` *(default)*: enables [`runtime`], pulling in `acvm` and `bn254_blackbox_solver`
+//!   (plus `acir_field` through `field`), all from crates.io at Noir [`NOIR_VERSION`]. The parts of
+//!   Noir's unpublished `nargo`/`noirc_abi` that are needed are reimplemented in [`runtime`].
+//! - `field`: exposes Noir's `FieldElement` as [`types::FieldElement`] without the runtime.
 //! - `prove`: enables the `prove` module, which proves and verifies with Barretenberg's `bb` CLI
 //!   (implies `runner`).
 #![warn(missing_docs)]

@@ -20,7 +20,9 @@ runtime depended on unpublished Noir crates.
   is discarded.
 - Generated functions take `&Args`. `Inputs`, `PublicInputs`, and `PrivateInputs` were removed:
   Noir 1.0 forbids `pub` on `#[export]` parameters, so they were always empty.
-- Generated code references only `::noi`; crates using `nrg!` need no other direct dependency.
+- Generated code references only `::noi`, and which items exist follows the features of the
+  `noi` crate it is compiled against (not the proc macro's host build). Crates using `nrg!` need
+  no other direct dependency. `noi-macro` no longer has features.
 - `noi-build`: `BuildOptions::from_env`/`new` builders, `ExportSummary::source`. `nargo export`
   runs on a temporary copy of the package, so the build never modifies the source tree;
   committed `export/` artifacts are only read, as a fallback.
@@ -30,16 +32,29 @@ runtime depended on unpublished Noir crates.
 - Relative `export_dir` paths in `nrg!` resolve against the invoking crate's `CARGO_MANIFEST_DIR`.
 
 ### Added
-- Proving (feature `prove`) with Barretenberg 6.0.0: `noi::Prover`, `noi::Proof` (with typed
-  `return_value`), `VerifierTarget` (default, EVM, recursive Noir), generated `prove`, `verify`,
-  `verified_output`, `verification_key`, and `solidity_verifier`. Verification keys are cached in
-  a private per-user directory keyed by a SHA-256 of the artifact, target, and `bb` version.
-- `noi::ExecutionError` with the assertion message (format strings filled in) and solver detail.
-- Execution of multi-circuit programs (`#[fold]`), Brillig, and oracles; `str<N>`, `u1`, and
-  `databus` ABI support; tuples up to 12 elements.
+- Proving (feature `prove`) with Barretenberg 6.0.0: `noi::Prover`, `noi::Proof` (whose
+  `return_value` decodes the public inputs; generated `verified_output` returns the typed
+  `Output`), `VerifierTarget` (default, EVM, recursive Noir), and generated `prove`, `verify`,
+  `verified_output`, `verification_key`, and `solidity_verifier`. `verify` hands `bb` an explicit
+  encoding of the statement it decoded, so `bb` and `return_value` always agree; `bb` environment
+  overrides are ignored; tooling failures are errors rather than "invalid proof". Verification
+  keys are cached in a private per-user directory keyed by a SHA-256 of the artifact, target, and
+  `bb` version. Single-circuit programs only (no `#[fold]`), a limit of bb's UltraHonk prover.
+- `noi::ExecutionError` with the assertion message as nargo prints it (format strings filled in,
+  out-of-bounds errors in the program's own coordinates) and the solver detail.
+- Execution of multi-circuit programs (`#[fold]`), Brillig, and oracles; `str<N>` (non-UTF-8
+  bytes decode lossily, as in nargo), `u1`, and `databus` ABI support; tuples up to 12 elements.
+- Artifacts are validated on load: invalid integer widths and encodings larger than `u32::MAX`
+  field elements are rejected instead of overflowing later.
 - `noi::noir_version_compatible`, `NOIR_VERSION`, `BB_VERSION`.
-- `scripts/install_bb.sh`, reproducible example artifacts, `scripts/check_exports.py`, and CI for
-  fmt, clippy, tests per feature set, proving, MSRV, packaging, and docs.
+- `noi-build`: Noir packages with a custom `[package] entry`, symlinked path dependencies, and
+  re-export after installing or upgrading `nargo`; staged artifacts have package-relative paths,
+  so builds are reproducible.
+- `scripts/install_bb.sh`, reproducible example artifacts, `scripts/check_exports.py`,
+  `scripts/test_packaged.sh`, a pinned development toolchain (1.92), a committed `Cargo.lock`, and
+  CI for fmt, clippy, tests per feature set, proving, real `nargo`, MSRV 1.89, packaging (including
+  the packaged crates' own tests), and docs.
+- Each published crate ships the Apache-2.0 `LICENSE`.
 - Crate-level guides and API docs on every public item, with runnable doctests.
 
 ### Fixed
@@ -51,9 +66,6 @@ runtime depended on unpublished Noir crates.
   dependency.
 - Codegen failed for Noir structs named `Client`, fields named `fields`, generic structs used with
   two type arguments, arrays longer than 32, and names that collide after `snake_case`.
-- Proving: `bb` environment variables could silently switch the verifier target; JSON-shaped
-  public inputs could be verified as a different statement than the one decoded; `bb` tooling
-  errors were reported as invalid proofs; cached keys were trusted by a non-cryptographic hash.
 - `scripts/refresh_exports.sh` could not download `nargo` (renamed release assets, Rosetta, a
   stdin bug), forced a full Rust toolchain download, and accepted any cached `nargo` version.
 

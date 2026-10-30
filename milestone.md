@@ -417,8 +417,12 @@ fn main() -> noi::Result<()> {
   reserved and colliding names, hygienic locals, clear errors for name collisions and >12-tuples.
 * `noi-build`: runs `nargo export` on a temporary copy (never writes the source tree), checks
   package type and `nargo` version first, fails on Noir compile errors, tracks path deps.
-* Reproducible example artifacts, CI (fmt, clippy, tests per feature set, proving with `bb`,
-  MSRV, packaging, docs), crate-level guides with runnable doctests.
+* Reproducible example and staged artifacts, CI (fmt, clippy, tests per feature set, proving with
+  `bb`, real `nargo`, MSRV, packaging plus packaged tests, docs), crate-level guides with runnable
+  doctests, a pinned development toolchain and committed `Cargo.lock`.
+* Fidelity with nargo: assertion messages (format-string escapes, value formatting,
+  out-of-bounds payloads) match nargo 1.0.0; non-UTF-8 strings decode lossily; artifacts are
+  validated on load.
 
 **Next**
 

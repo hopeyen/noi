@@ -33,10 +33,11 @@ The full API guide is in the [`noi` crate docs](https://docs.rs/noi).
 - **Published on crates.io:** the runtime depends only on Noir crates that are on crates.io.
 
 ## Requirements
-- Rust 1.89 or newer (the MSRV of the Noir 1.0 crates).
-- To export artifacts: `nargo` **1.0.0** (`noirup --version 1.0.0`). Artifacts from other Noir
-  releases are rejected with a message naming both versions; `noi::NOIR_VERSION` is the
-  supported release.
+- Rust 1.89 or newer (the MSRV of the Noir 1.0 crates). The repository pins 1.92 for development
+  (`rust-toolchain.toml`).
+- To export artifacts: a stable Noir **1.0.x** `nargo` (`noirup --version 1.0.0` recommended).
+  Artifacts from prereleases (such as `1.0.0-beta.N`) or other major/minor releases are rejected
+  with a message naming both versions; see `noi::noir_version_compatible`.
 - To prove (feature `prove`): Barretenberg `bb` **6.0.0**, the release paired with Noir 1.0.0. Run
   `bbup -v 6.0.0`, or `scripts/install_bb.sh`, which installs into `target/bb-bin/` without
   editing your shell configuration.
@@ -184,12 +185,16 @@ fn check_score(score: &risk::score::Output) -> Result<(), String> {
 | `NOI_BB_BIN` | `prove` | `bb` to run (default: `bb` on `PATH`). |
 | `NOI_CACHE_DIR` | `prove` | Verification-key cache (default: the per-user cache directory). |
 
-The verification-key cache is trusted: anyone who can write it can make forged proofs verify, so
-`noi` creates it with mode `0700` and refuses a directory that other users can write.
+The verification-key cache is trusted: anyone who can write it can make forged proofs verify. On
+Unix, `noi` creates it with mode `0700` and refuses a directory that is not owned by the current
+user or that group/others can write. Other platforms get no such check, so keep `NOI_CACHE_DIR` in
+a per-user directory there.
 
 ## Limitations
 - Proving shells out to the `bb` CLI, which must be installed wherever proofs are made or
   verified.
+- bb's UltraHonk prover only accepts single-circuit programs: functions that call `#[fold]`
+  functions can be simulated but not proved (the prover says so before running `bb`).
 - `println` output from Noir is discarded; handle the `print` oracle with `Client::with_oracle` to
   capture it raw.
 - Each instantiation of a generic Noir struct (`Option<u8>`, `Option<u32>`) is a separate Rust
@@ -217,8 +222,9 @@ scripts/
   publish.sh           # publish all crates in dependency order
 ```
 
-Proc macros must live in their own crate, and build scripts cannot depend on proc-macro crates, so
-the macro, build helper, and runtime are separate crates; `noi` ties them together.
+A proc-macro crate can export only procedural macros, so `nrg!` lives in `noi-macro`. The build
+helper (`noi-build`) is an ordinary library that depends only on the schema part of `noi-core`, so
+`build.rs` does not compile the ACVM runtime or the prover. `noi` re-exports everything.
 
 ## Running the examples
 
@@ -235,7 +241,9 @@ See [`examples/README.md`](examples/README.md) for what each example covers.
 - Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Test: `cargo test --workspace`; with proving: `NOI_BB_BIN=$(scripts/install_bb.sh) cargo test --workspace --features noi/prove,noi-core/prove`
 - Package: `cargo package --workspace --exclude noi-example-app --exclude noi-dark-pool-example`
-  (cargo 1.90+) builds every crate from its packaged sources, as `cargo publish` does.
+  builds every crate from its packaged sources, as `cargo publish` does; then
+  `scripts/test_packaged.sh` runs each packaged crate's own tests.
+- MSRV: `cargo +1.89 check --workspace --all-targets --all-features`.
 
 Read `AGENTS.md` for engineering standards and `milestone.md` for scope.
 
@@ -257,7 +265,10 @@ fails if the committed artifacts differ.
   `Client::with_oracle`.
 - **"`bb` is bb X, but noi requires bb 6.0.0"**: install the paired release, or opt out with
   `Prover::allow_any_bb_version(true)`.
-- **"`NOI_EXPORT_DIR` is not set"**: call `noi_build` from `build.rs`, or pass `export_dir`.
+- **"nrg!: no export directory"**: call `noi_build` from `build.rs` (it sets `NOI_EXPORT_DIR`),
+  or pass `export_dir = "path/to/noir/export"` to `nrg!`.
+- **"… calls `#[fold]` functions … only supports single-circuit programs"**: remove `#[fold]` from
+  functions you need to prove.
 
 ## Roadmap
 - **v0.0.1:** export schema, `nrg!` codegen, `noi-build` (schema only on crates.io).

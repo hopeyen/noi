@@ -11,19 +11,26 @@ use acvm::{
     acir::native_types::{Witness, WitnessMap},
     AcirField, FieldElement,
 };
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 
 use super::{InputMap, Value};
 use crate::export::{ExportFunction, TypeRepr};
 
 /// Number of field elements `ty` occupies once encoded (`AbiType::field_count`).
+///
+/// Artifacts are validated on load (`export::checked_field_count`), so this cannot overflow for
+/// types that came from a `Program`; saturating arithmetic is a second guard.
 pub(crate) fn field_count(ty: &TypeRepr) -> usize {
     match ty {
         TypeRepr::Bool | TypeRepr::Field | TypeRepr::Unsigned(_) | TypeRepr::Signed(_) => 1,
         TypeRepr::String(len) => *len,
-        TypeRepr::Array(inner, len) => field_count(inner) * len,
-        TypeRepr::Tuple(items) => items.iter().map(field_count).sum(),
-        TypeRepr::Struct(st) => st.fields.iter().map(|f| field_count(&f.ty)).sum(),
+        TypeRepr::Array(inner, len) => field_count(inner).saturating_mul(*len),
+        TypeRepr::Tuple(items) => items.iter().map(field_count).fold(0, usize::saturating_add),
+        TypeRepr::Struct(st) => st
+            .fields
+            .iter()
+            .map(|f| field_count(&f.ty))
+            .fold(0, usize::saturating_add),
     }
 }
 
@@ -190,9 +197,9 @@ pub(crate) fn decode_value(
                         .ok_or_else(|| anyhow!("`{path}`: {field} is not a byte"))
                 })
                 .collect::<Result<Vec<u8>>>()?;
-            Value::String(
-                String::from_utf8(bytes).with_context(|| format!("`{path}` is not valid UTF-8"))?,
-            )
+            // Noir strings may hold arbitrary bytes (`[u8; N].as_str_unchecked()`); decode them
+            // lossily, like nargo, rather than failing a circuit that solved.
+            Value::String(String::from_utf8_lossy(&bytes).into_owned())
         }
         TypeRepr::Array(inner, len) => Value::Array(
             (0..*len)
@@ -283,5 +290,12 @@ mod tests {
 
         let err = decode_value(&mut [f(300)].into_iter(), &TypeRepr::Unsigned(8), "r").unwrap_err();
         assert!(err.to_string().contains("does not fit"), "{err}");
+    }
+
+    #[test]
+    fn non_utf8_strings_decode_lossily() {
+        let out =
+            decode_value(&mut [f(97), f(0xfe)].into_iter(), &TypeRepr::String(2), "s").unwrap();
+        assert_eq!(out, Value::String("a\u{FFFD}".into()));
     }
 }

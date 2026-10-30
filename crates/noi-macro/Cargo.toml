@@ -16,13 +16,6 @@ categories = ["development-tools::procedural-macro-helpers", "cryptography"]
 [lib]
 proc-macro = true
 
-[features]
-default = []
-# Emit `program`/`execute`/`simulate` and value conversions (requires `noi-core/runner` at the call site).
-runner = []
-prove = []
-field = []
-
 [dependencies]
 heck.workspace = true
 noi-core = { version = "0.0.2", path = "../noi-core", default-features = false }

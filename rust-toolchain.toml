@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned so local builds and CI see the same lints; bump deliberately. The MSRV (1.89, see the
+# workspace `rust-version`) is checked separately in CI.
+channel = "1.92"
 components = ["rustfmt", "clippy"]

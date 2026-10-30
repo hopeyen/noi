@@ -81,6 +81,16 @@ fn expand(input: &MacroInput) -> syn::Result<Tokens> {
         }
     }
 
+    // Structs and function modules share Rust's type namespace.
+    for (st, ident) in &names.0 {
+        if let Some(function) = module_idents.get(&ident.to_string()) {
+            return Err(error(format!(
+                "struct `{}` and export `{function}` both map to the Rust name `{ident}`; rename one",
+                st.path
+            )));
+        }
+    }
+
     let struct_defs = structs
         .iter()
         .map(|st| gen.struct_def(st))
@@ -102,7 +112,13 @@ fn expand(input: &MacroInput) -> syn::Result<Tokens> {
 
     Ok(quote! {
         #[doc = #module_doc]
-        #[allow(clippy::all, clippy::pedantic, unused_imports, non_camel_case_types)]
+        #[allow(
+            clippy::all,
+            clippy::pedantic,
+            clippy::nursery,
+            unused_imports,
+            non_camel_case_types
+        )]
         pub mod #module {
             // Makes cargo rebuild this crate when `NOI_DEBUG` changes, so the dump is written.
             const _: ::core::option::Option<&str> = ::core::option_env!("NOI_DEBUG");
@@ -352,8 +368,7 @@ impl Generator<'_> {
         } else {
             quote!(::core::result::Result::Ok(()))
         };
-        let prove_fns = if cfg!(feature = "prove") {
-            quote! {
+        let prove_fns = prove_only(quote! {
                 /// Executes the function and proves the execution with Barretenberg, using the
                 /// prover configured on `client` (see [`Client::with_prover`](::noi::Client::with_prover)).
                 ///
@@ -418,11 +433,8 @@ impl Generator<'_> {
                     client: &::noi::Client,
                 ) -> ::noi::Result<::std::string::String> {
                     client.prover().solidity_verifier(program()?)
-                }
             }
-        } else {
-            Tokens::new()
-        };
+        });
 
         let module_doc = format!("Bindings for `{signature}`.");
         Ok(quote! {
@@ -451,12 +463,15 @@ impl Generator<'_> {
     }
 }
 
+/// Items that need `noi`'s `runner` feature. The check happens in the *target* `noi` crate (the
+/// proc macro's own features are those of the host build and may differ).
 fn runner_only(tokens: Tokens) -> Tokens {
-    if cfg!(feature = "runner") {
-        tokens
-    } else {
-        Tokens::new()
-    }
+    quote!(::noi::__private::if_runner! { #tokens })
+}
+
+/// Items that need `noi`'s `prove` feature (see [`runner_only`]).
+fn prove_only(tokens: Tokens) -> Tokens {
+    quote!(::noi::__private::if_prove! { #tokens })
 }
 
 fn derives(default: bool) -> Tokens {

@@ -253,3 +253,27 @@ fn incompatible_artifacts_name_both_versions() {
         );
     }
 }
+
+#[test]
+fn out_of_bounds_messages_use_the_programs_coordinates() {
+    let point = |x: u32, y: u32| {
+        Value::Struct(BTreeMap::from([
+            ("x".to_string(), x.to_value()),
+            ("y".to_string(), y.to_value()),
+        ]))
+    };
+    let err = demo("pick")
+        .execute(
+            &Client::new(),
+            &inputs([
+                ("i", 7u32.to_value()),
+                ("points", Value::Array(vec![point(1, 2), point(3, 4)])),
+            ]),
+        )
+        .unwrap_err();
+    // nargo 1.0.0 reports the same message for this access.
+    assert_eq!(
+        exec_error(&err).message(),
+        Some("Index out of bounds, array has size 2, but index was 7")
+    );
+}

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
       - name: Default features
         run: cargo test --workspace
@@ -51,21 +51,27 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    env:
+      # rust-toolchain.toml pins the development toolchain; override it for this job.
+      RUSTUP_TOOLCHAIN: "1.89"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets --all-features
+      - run: cargo --version && cargo check --workspace --all-targets --all-features
 
   package:
-    # Packages every publishable crate and builds it from the packaged sources, exactly as
-    # `cargo publish` would, then runs the tests shipped inside each package.
+    # Packages every publishable crate and builds it from the packaged sources, as `cargo publish`
+    # would, then runs the tests shipped inside each package (they must not read files outside it).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --workspace --exclude noi-example-app --exclude noi-dark-pool-example
+      - name: Licenses are packaged
+        run: for c in noi noi-core noi-build noi-macro; do tar -tzf target/package/$c-*.crate | grep -q '/LICENSE$'; done
+      - run: scripts/test_packaged.sh
 
   prove:
     runs-on: ubuntu-latest
@@ -74,7 +80,7 @@ jobs:
       NOI_REQUIRE_BB: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
       - name: Install bb
         # A separate assignment so a failed install fails the step.
@@ -88,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps -p noi -p noi-core -p noi-build -p noi-macro --all-features
         env:

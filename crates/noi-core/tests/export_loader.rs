@@ -97,3 +97,24 @@ fn generic_instantiations_are_distinct_structs() {
     );
     assert_eq!(structs[1].fields[1].ty, TypeRepr::Unsigned(32));
 }
+
+#[test]
+fn invalid_abis_are_rejected_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |json: &str| {
+        std::fs::write(dir.path().join("f.json"), json).unwrap();
+        load_export_file(dir.path().join("f.json"))
+    };
+    let int = |w: u32| {
+        format!(
+            r#"{{"abi":{{"parameters":[{{"name":"x","type":{{"kind":"integer","sign":"unsigned","width":{w}}}}}]}}}}"#
+        )
+    };
+    assert!(write(&int(32)).is_ok());
+    assert!(format!("{:#}", write(&int(0)).unwrap_err()).contains("not a Noir integer"));
+    assert!(format!("{:#}", write(&int(7)).unwrap_err()).contains("not a Noir integer"));
+    // 2^32 * 2^32 elements would overflow witness indices (and usize arithmetic on 32-bit hosts).
+    let huge = r#"{"abi":{"parameters":[{"name":"x","type":{"kind":"array","length":4294967295,
+        "type":{"kind":"array","length":4294967295,"type":{"kind":"field"}}}}]}}"#;
+    assert!(format!("{:#}", write(huge).unwrap_err()).contains("too many field elements"));
+}

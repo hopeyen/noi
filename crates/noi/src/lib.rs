@@ -47,6 +47,7 @@
 //! # noi::nrg!(module = demo, export_dir = "tests/fixtures/demo");
 //! // noi::nrg!(module = demo);   // reads NOI_EXPORT_DIR, set by noi-build
 //!
+//! # #[cfg(feature = "runner")]
 //! # fn main() -> noi::Result<()> {
 //! let client = demo::Client::new();
 //!
@@ -61,6 +62,8 @@
 //! assert_eq!(p, demo::P { x: 6, y: 3 });
 //! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "runner"))]
+//! # fn main() {}
 //! ```
 //!
 //! # What `nrg!` generates
@@ -128,6 +131,7 @@
 //!
 //! ```
 //! # noi::nrg!(module = demo, export_dir = "tests/fixtures/demo");
+//! # #[cfg(feature = "runner")] {
 //! # let client = demo::Client::new();
 //! // Noir: fn checked_div(a: u32, b: u32) -> u32 { assert(b != 0, "division by zero"); a / b }
 //! let err = demo::checked_div::simulate(&client, &demo::checked_div::Args { a: 1, b: 0 })
@@ -135,6 +139,7 @@
 //! let exec = err.downcast_ref::<noi::ExecutionError>().unwrap();
 //! assert_eq!(exec.function(), "checked_div");
 //! assert_eq!(exec.message(), Some("division by zero"));
+//! # }
 //! ```
 //!
 //! # Oracles
@@ -145,6 +150,7 @@
 //!
 //! ```
 //! # noi::nrg!(module = demo, export_dir = "tests/fixtures/demo");
+//! # #[cfg(feature = "runner")]
 //! # fn main() -> noi::Result<()> {
 //! use noi::{FieldElement, OracleValue};
 //!
@@ -159,6 +165,8 @@
 //! assert_eq!(total, FieldElement::from(1000u128));
 //! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "runner"))]
+//! # fn main() {}
 //! ```
 //!
 //! # Proving
@@ -204,9 +212,13 @@
 //! ```
 //!
 //! Verification keys are computed once per circuit, verifier target, and `bb` release, and cached
-//! on disk (`$NOI_CACHE_DIR`, default: the per-user cache directory). The cache is trusted, so
-//! `noi` creates it private and refuses one other users can write. Proofs from a browser
+//! on disk (`$NOI_CACHE_DIR`, default: the per-user cache directory). The cache is trusted: on
+//! Unix `noi` creates it private (`0700`) and refuses one other users can write; other platforms
+//! are not checked, so never point `NOI_CACHE_DIR` at a shared directory. Proofs from a browser
 //! (`bb.js`) can be checked with `noi::Proof::from_parts` and `verify`.
+//!
+//! bb's UltraHonk prover only accepts single-circuit programs, so a function that calls `#[fold]`
+//! functions can be simulated but not proved; `prove` reports this before invoking `bb`.
 //!
 //! # Performance
 //!
@@ -250,9 +262,38 @@ pub use noi_macro::nrg;
 /// Result type returned by generated bindings (an alias for [`anyhow::Result`]).
 pub type Result<T, E = anyhow::Error> = std::result::Result<T, E>;
 
+// `nrg!` runs on the host and cannot see which features *this* crate was built with, so the
+// generated code wraps feature-dependent items in these passthrough macros, which expand to
+// their input only when the feature is enabled here.
+#[cfg(feature = "runner")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __noi_if_runner {
+    ($($tokens:tt)*) => { $($tokens)* };
+}
+#[cfg(not(feature = "runner"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __noi_if_runner {
+    ($($tokens:tt)*) => {};
+}
+#[cfg(feature = "prove")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __noi_if_prove {
+    ($($tokens:tt)*) => { $($tokens)* };
+}
+#[cfg(not(feature = "prove"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __noi_if_prove {
+    ($($tokens:tt)*) => {};
+}
+
 /// Implementation details used by code generated with [`nrg!`]. Not part of the public API.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::{__noi_if_prove as if_prove, __noi_if_runner as if_runner};
     pub use anyhow;
     #[cfg(feature = "runner")]
     pub use noi_core::runtime;
