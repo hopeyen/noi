@@ -1,0 +1,4 @@
+# Every path in the repository requires review from @hopeyen.
+# Combined with the "Require review from Code Owners" branch protection
+# on `main`, no pull request can merge without @hopeyen's approval.
+* @hopeyen
